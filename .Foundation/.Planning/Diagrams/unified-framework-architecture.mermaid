@@ -1,0 +1,89 @@
+flowchart TD
+    Speech([Speech Audio]) --> Whisper["Whisper Algorithm<br/>Speech-to-Text"]
+    Whisper --> TextFile["Text File<br/>Raw Speech Content"]
+    
+    TextFile --> ConstitutionAgent["Constitution Agent<br/>Phase 0"]
+    
+    ConstitutionAgent --> C0["C0: Root Constitution<br/>Main App Idea<br/>Constellation Structure"]
+    ConstitutionAgent --> C1["C1: App Constitution<br/>Micro-app 1"]
+    ConstitutionAgent --> C2["C2: App Constitution<br/>Micro-app 2"]
+    ConstitutionAgent --> CN["CN: App Constitution<br/>Micro-app N"]
+    
+    C0 --> PlannerAgent["Planner Agent<br/>Phase 1"]
+    C1 --> PlannerAgent
+    C2 --> PlannerAgent
+    CN --> PlannerAgent
+    
+    PlannerAgent --> Plan1["Plan1 Folder<br/>plan1.md + test1.md"]
+    PlannerAgent --> Plan2["Plan2 Folder<br/>plan2.md + test2.md"]
+    PlannerAgent --> PlanN["PlanN Folder<br/>planN.md + testN.md"]
+    
+    Plan1 --> Plan1Waves["Plan1/waves/<br/>wave1, wave2...waveN"]
+    Plan2 --> Plan2Waves["Plan2/waves/<br/>wave1, wave2...waveN"]
+    PlanN --> PlanNWaves["PlanN/waves/<br/>wave1, wave2...waveN"]
+    
+    Plan1Waves --> QuestionAgent["Question Agent<br/>Phase 2"]
+    Plan2Waves --> QuestionAgent
+    PlanNWaves --> QuestionAgent
+    
+    QuestionAgent --> Questions["Questions.md<br/>Ambiguities Identified"]
+    QuestionAgent --> DecisionLog1["Decision Log<br/>Autonomous Decisions"]
+    
+    Questions --> OptimizationAgent["Optimization Agent<br/>Phase 3<br/>(Senior Engineer)"]
+    DecisionLog1 --> OptimizationAgent
+    
+    OptimizationAgent --> HistoricalAnalysis["Historical Analysis<br/>Guides/, Design/, Docs/"]
+    HistoricalAnalysis --> OptimizationAgent
+    
+    OptimizationAgent --> OptimizedPlan1["Optimized Plan1<br/>Enhanced Tests<br/>Decision Log"]
+    OptimizationAgent --> OptimizedPlan2["Optimized Plan2<br/>Enhanced Tests<br/>Decision Log"]
+    OptimizationAgent --> OptimizedPlanN["Optimized PlanN<br/>Enhanced Tests<br/>Decision Log"]
+    
+    OptimizedPlan1 --> StagesAgent["Stages Agent<br/>Phase 4"]
+    OptimizedPlan2 --> StagesAgent
+    OptimizedPlanN --> StagesAgent
+    
+    StagesAgent --> DependencyAnalysis["Dependency Analysis<br/>DAG Construction"]
+    DependencyAnalysis --> StagesMD["stages.md<br/>Execution Strategy<br/>Parallel Stages"]
+    
+    StagesMD --> Phase5["Phase 5: Parallel Execution<br/>Test-Driven Generation"]
+    
+    Phase5 --> Stage1["Stage 1: Parallel Waves<br/>Wave1, Wave3<br/>Agents A, B, C"]
+    Phase5 --> Stage2["Stage 2: Dependent Waves<br/>Wave4, Wave5, Wave8<br/>Agents D, E, F"]
+    
+    Stage1 --> TestDriven1["Test-Driven Generation<br/>Code + Tests Simultaneously"]
+    Stage2 --> TestDriven2["Test-Driven Generation<br/>Code + Tests Simultaneously"]
+    
+    TestDriven1 --> RunTests1["Run Tests Immediately"]
+    TestDriven2 --> RunTests2["Run Tests Immediately"]
+    
+    RunTests1 --> Validate1{"Tests Pass?"}
+    RunTests2 --> Validate2{"Tests Pass?"}
+    
+    Validate1 -->|Fail| Debug1["Debug Code + Tests<br/>Max 3 Attempts"]
+    Validate2 -->|Fail| Debug2["Debug Code + Tests<br/>Max 3 Attempts"]
+    
+    Debug1 --> RunTests1
+    Debug2 --> RunTests2
+    
+    Validate1 -->|Pass| Complete1["Wave Complete"]
+    Validate2 -->|Pass| Complete2["Wave Complete"]
+    
+    Complete1 --> Integration["Cross-Wave Integration"]
+    Complete2 --> Integration
+    
+    Integration --> Constellation["Complete Constellation<br/>Business Deployed"]
+    
+    style Speech fill:#1e88e5,color:#fff
+    style ConstitutionAgent fill:#f57c00,color:#fff
+    style PlannerAgent fill:#388e3c,color:#fff
+    style QuestionAgent fill:#7b1fa2,color:#fff
+    style OptimizationAgent fill:#d32f2f,color:#fff
+    style StagesAgent fill:#5d4037,color:#fff
+    style Phase5 fill:#ff6f00,color:#fff
+    style TestDriven1 fill:#9c27b0,color:#fff
+    style TestDriven2 fill:#9c27b0,color:#fff
+    style Constellation fill:#1b5e20,color:#fff
+    style C0 fill:#fff3e0,color:#000
+    style Questions fill:#f3e5f5,color:#000
+    style StagesMD fill:#fff9c4,color:#000

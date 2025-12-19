@@ -1,0 +1,16 @@
+---
+converted: '2025-10-25'
+source: AlgorithmforDecisionMaking.pdf
+title: '])'
+---
+
+# ])
+
+_Source page: 135_
+
+
+
+is equal to
+
+
+0.5

@@ -1,0 +1,80 @@
+flowchart TD
+    Start([Constitution.tex]) --> Planner["Foundation Planner<br/>+ Pipeline Phases"]
+    
+    Planner --> Phase0["Phase 0: Plan + Test Generation"]
+    Phase0 --> PlanMD["plan.md<br/>Feature Requirements"]
+    Phase0 --> TestMD["test.md<br/>Test Specifications"]
+    
+    PlanMD --> Phase1["Phase 1: Wave Decomposition"]
+    TestMD --> Phase1
+    
+    Phase1 --> Wave1["Wave1: planw1.md"]
+    Phase1 --> Wave2["Wave2: planw2.md"]
+    Phase1 --> Wave3["Wave3: planw3.md"]
+    Phase1 --> WaveN["WaveN: planwN.md"]
+    
+    Wave1 --> Phase2["Phase 2: Self-Resolution<br/>+ Test Generation"]
+    Wave2 --> Phase2
+    Wave3 --> Phase2
+    WaveN --> Phase2
+    
+    Phase2 --> Search["Search Project History<br/>Guides/, Plans/, Codebase"]
+    Search --> Resolve{"Pattern Found?"}
+    Resolve -->|Yes| ApplyPattern["Apply Historical Pattern"]
+    Resolve -->|No - Required| IndustryStd["Apply Industry Standard"]
+    Resolve -->|No - Not Required| Skip["Skip Feature"]
+    
+    ApplyPattern --> DecisionLog["decision_log.md<br/>Autonomous Decisions"]
+    IndustryStd --> DecisionLog
+    Skip --> DecisionLog
+    
+    DecisionLog --> UpdateWaves["Update planw[N].md<br/>with Resolutions"]
+    UpdateWaves --> GenWaveTests["Generate testw[N].md<br/>Wave Test Specs"]
+    
+    GenWaveTests --> Phase3["Phase 3: Dependency Analysis"]
+    
+    Phase3 --> DepGraph["Build Dependency Graph<br/>DAG"]
+    DepGraph --> CalcStages["Calculate Execution Stages"]
+    CalcStages --> StagesMD["stages.md<br/>Parallel Execution Plan"]
+    
+    StagesMD --> Phase4["Phase 4: Parallel Execution"]
+    
+    Phase4 --> Stage1["Stage 1: Parallel Waves<br/>Wave1, Wave3<br/>Agents A, B, C"]
+    Phase4 --> Stage2["Stage 2: Dependent Waves<br/>Wave4, Wave5, Wave8<br/>Agents D, E, F"]
+    
+    Stage1 --> TestDriven1["Test-Driven Generation<br/>Code + Tests Simultaneously"]
+    Stage2 --> TestDriven2["Test-Driven Generation<br/>Code + Tests Simultaneously"]
+    
+    TestDriven1 --> RunTests1["Run Tests Immediately"]
+    TestDriven2 --> RunTests2["Run Tests Immediately"]
+    
+    RunTests1 --> Validate1{"Tests Pass?"}
+    RunTests2 --> Validate2{"Tests Pass?"}
+    
+    Validate1 -->|Fail| Debug1["Debug Code + Tests<br/>Max 3 Attempts"]
+    Validate2 -->|Fail| Debug2["Debug Code + Tests<br/>Max 3 Attempts"]
+    
+    Debug1 --> RunTests1
+    Debug2 --> RunTests2
+    
+    Validate1 -->|Pass| Complete1["Wave Complete"]
+    Validate2 -->|Pass| Complete2["Wave Complete"]
+    
+    Complete1 --> Integration["Cross-Wave Integration"]
+    Complete2 --> Integration
+    
+    Integration --> Constellation["Complete Constellation<br/>Business Deployed"]
+    
+    style Start fill:#1e88e5,color:#fff
+    style Planner fill:#f57c00,color:#fff
+    style Phase0 fill:#388e3c,color:#fff
+    style Phase1 fill:#388e3c,color:#fff
+    style Phase2 fill:#388e3c,color:#fff
+    style Phase3 fill:#388e3c,color:#fff
+    style Phase4 fill:#388e3c,color:#fff
+    style DecisionLog fill:#f9a825,color:#000
+    style StagesMD fill:#f9a825,color:#000
+    style TestDriven1 fill:#7b1fa2,color:#fff
+    style TestDriven2 fill:#7b1fa2,color:#fff
+    style Constellation fill:#1b5e20,color:#fff
+

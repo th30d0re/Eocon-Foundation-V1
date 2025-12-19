@@ -1,0 +1,978 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% FOUNDATION CONSTITUTION TEMPLATE
+%% Version: 1.0
+%% Purpose: Standard template for Planner Agent constitution generation
+%% 
+%% INSTRUCTIONS FOR PLANNER AGENT:
+%% 1. Replace all <PLACEHOLDER> tokens with actual values
+%% 2. Remove or comment out sections not needed for specific project
+%% 3. Add additional sections as required by project scope
+%% 4. Maintain Article numbering consistency after modifications
+%% 5. Update Table of Contents by recompiling
+%%
+%% PLACEHOLDER LEGEND:
+%% <PROJECT-NAME>         - Name of the project/micro-app
+%% <PROJECT-TYPE>         - Type: Micro-App, Constellation, Service, etc.
+%% <VERSION>              - Semantic version (e.g., 1.0.0)
+%% <AUTHOR>               - Primary author/owner
+%% <ABSTRACT>             - Executive summary (2-3 sentences)
+%% <PURPOSE-STATEMENT>    - Why this system exists
+%% <DOMAIN>               - Business domain (e.g., Healthcare, Finance)
+%% <TARGET-STACK>         - Technology stack (e.g., Swift/SwiftUI, Next.js)
+%% <PARENT-CONSTITUTION>  - Parent constitution ID (for sub-constitutions)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[12pt,letterpaper]{article}
+
+%===============================================================================
+% PACKAGES - Standard Foundation Configuration
+%===============================================================================
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{tocloft}
+\usepackage{hyperref}
+\usepackage{longtable}
+\usepackage{booktabs}
+
+%===============================================================================
+% COLOR DEFINITIONS - Foundation Standard Palette
+%===============================================================================
+\definecolor{primaryblue}{RGB}{0,102,204}
+\definecolor{secondarygreen}{RGB}{0,153,76}
+\definecolor{accentorange}{RGB}{255,102,0}
+\definecolor{warningred}{RGB}{204,0,0}
+\definecolor{neutralgray}{RGB}{128,128,128}
+
+%===============================================================================
+% HEADER/FOOTER CONFIGURATION
+%===============================================================================
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{PROJECT-NAME}
+\lhead{Constitutional Document}
+\rfoot{Page \thepage}
+\setlength{\headheight}{14.49998pt}
+\addtolength{\topmargin}{-2.49998pt}
+
+%===============================================================================
+% TITLE FORMATTING
+%===============================================================================
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{primaryblue}}{\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{secondarygreen}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\normalfont\normalsize\bfseries\color{neutralgray}}{\thesubsubsection}{1em}{}
+
+%===============================================================================
+% TABLE OF CONTENTS FORMATTING
+%===============================================================================
+\setlength{\emergencystretch}{3em}
+\renewcommand{\cftsecleader}{\cftdotfill{\cftdotsep}}
+\renewcommand{\cftsubsecleader}{\cftdotfill{\cftdotsep}}
+\renewcommand{\cftsubsubsecleader}{\cftdotfill{\cftdotsep}}
+
+\renewcommand{\cftsecfont}{\normalfont\bfseries\color{primaryblue}}
+\renewcommand{\cftsecpagefont}{\normalfont\bfseries\color{primaryblue}}
+\setlength{\cftsecnumwidth}{3em}
+\setlength{\cftsecindent}{0em}
+
+\renewcommand{\cftsubsecfont}{\normalfont\color{black}}
+\renewcommand{\cftsubsecpagefont}{\normalfont\color{black}}
+\setlength{\cftsubsecnumwidth}{4em}
+\setlength{\cftsubsecindent}{1.5em}
+
+\setlength{\cftbeforetoctitleskip}{1em}
+\setlength{\cftaftertoctitleskip}{1.5em}
+\setlength{\cftparskip}{0.3em}
+\setlength{\cftbeforesecskip}{0.5em}
+
+\renewcommand{\cftdotsep}{2}
+\renewcommand{\cftdot}{$\cdot$}
+
+%===============================================================================
+% HYPERLINK CONFIGURATION
+%===============================================================================
+\hypersetup{
+    colorlinks=true,
+    linkcolor=primaryblue,
+    filecolor=primaryblue,
+    urlcolor=accentorange,
+    citecolor=secondarygreen,
+    pdftitle={PROJECT-NAME - Constitutional Document},
+    pdfauthor={AUTHOR},
+    pdfsubject={PROJECT-TYPE Constitution},
+    pdfkeywords={foundation, constitution, DOMAIN},
+    bookmarksnumbered=true,
+    bookmarksopen=true,
+    bookmarksopenlevel=2
+}
+
+%===============================================================================
+% CUSTOM ENVIRONMENTS
+%===============================================================================
+% Requirement Box
+\newtcolorbox{requirementbox}[1][]{
+    colback=blue!5,
+    colframe=primaryblue,
+    title=#1,
+    fonttitle=\bfseries
+}
+
+% Constraint Box
+\newtcolorbox{constraintbox}[1][]{
+    colback=orange!5,
+    colframe=accentorange,
+    title=#1,
+    fonttitle=\bfseries
+}
+
+% Integration Box
+\newtcolorbox{integrationbox}[1][]{
+    colback=green!5,
+    colframe=secondarygreen,
+    title=#1,
+    fonttitle=\bfseries
+}
+
+% Warning Box
+\newtcolorbox{warningbox}[1][]{
+    colback=red!5,
+    colframe=warningred,
+    title=#1,
+    fonttitle=\bfseries
+}
+
+%===============================================================================
+% DOCUMENT START
+%===============================================================================
+\begin{document}
+
+%-------------------------------------------------------------------------------
+% TITLE PAGE
+%-------------------------------------------------------------------------------
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries PROJECT-NAME}\\[0.5cm]
+    {\Large Constitutional Document}\\[0.3cm]
+    {\large PROJECT-TYPE}\\[0.5cm]
+
+    \vspace{1cm}
+
+    {\Large\itshape PURPOSE-STATEMENT}\\[2cm]
+
+    \vspace{1cm}
+
+    %% METADATA SECTION
+    \begin{tabular}{ll}
+        \textbf{Version:} & VERSION \\
+        \textbf{Date:} & \today \\
+        \textbf{Author:} & AUTHOR \\
+        \textbf{Domain:} & DOMAIN \\
+        \textbf{Target Stack:} & TARGET-STACK \\
+        %% OPTIONAL: Parent Constitution (for sub-constitutions)
+        % \textbf{Parent:} & PARENT-CONSTITUTION \\
+    \end{tabular}
+
+    \vfill
+
+    %% ABSTRACT
+    {\large\bfseries Abstract}\\[0.5cm]
+    \begin{tcolorbox}[colback=gray!10,colframe=primaryblue,width=0.9\textwidth]
+    ABSTRACT-TEXT-HERE
+    \end{tcolorbox}
+
+\end{titlepage}
+
+%-------------------------------------------------------------------------------
+% TABLE OF CONTENTS
+%-------------------------------------------------------------------------------
+\renewcommand{\contentsname}{Table of Contents}
+\renewcommand{\cfttoctitlefont}{\huge\bfseries\color{primaryblue}}
+\tableofcontents
+\newpage
+
+%===============================================================================
+% ARTICLE I: PURPOSE AND SCOPE
+%===============================================================================
+\section{Article I: Purpose and Scope}
+
+\subsection{Section 1: Mission Statement}
+
+%% INSTRUCTION: Define the core mission of this project/micro-app
+%% This should answer: "Why does this system exist?"
+
+MISSION-STATEMENT-HERE
+
+\subsection{Section 2: Scope Definition}
+
+\subsubsection{In Scope}
+
+%% INSTRUCTION: List what IS included in this project
+\begin{itemize}
+    \item IN-SCOPE-ITEM-1
+    \item IN-SCOPE-ITEM-2
+    \item IN-SCOPE-ITEM-3
+    %% Add more items as needed
+\end{itemize}
+
+\subsubsection{Out of Scope}
+
+%% INSTRUCTION: Explicitly list what is NOT included
+\begin{itemize}
+    \item OUT-OF-SCOPE-ITEM-1
+    \item OUT-OF-SCOPE-ITEM-2
+    %% Add more items as needed
+\end{itemize}
+
+\subsection{Section 3: Success Criteria}
+
+%% INSTRUCTION: Define measurable success criteria
+\begin{requirementbox}[Definition of Done]
+\begin{enumerate}
+    \item SUCCESS-CRITERION-1
+    \item SUCCESS-CRITERION-2
+    \item SUCCESS-CRITERION-3
+    %% Add more criteria as needed
+\end{enumerate}
+\end{requirementbox}
+
+%===============================================================================
+% ARTICLE II: REQUIREMENTS
+%===============================================================================
+\section{Article II: Requirements}
+
+\subsection{Section 1: Functional Requirements}
+
+%% INSTRUCTION: List all functional requirements
+%% Use FR-XXX format for traceability
+
+\begin{longtable}{|p{2cm}|p{4cm}|p{6cm}|p{2cm}|}
+\hline
+\textbf{ID} & \textbf{Requirement} & \textbf{Description} & \textbf{Priority} \\
+\hline
+\endhead
+
+FR-001 & FR-NAME-1 & FR-DESCRIPTION-1 & FR-PRIORITY-1 \\
+\hline
+FR-002 & FR-NAME-2 & FR-DESCRIPTION-2 & FR-PRIORITY-2 \\
+\hline
+%% Add more requirements as needed
+
+\end{longtable}
+
+\subsection{Section 2: Non-Functional Requirements}
+
+%% INSTRUCTION: Define quality attributes and constraints
+
+\subsubsection{Performance Requirements}
+
+\begin{constraintbox}[Performance Constraints]
+\begin{itemize}
+    \item \textbf{Response Time:} RESPONSE-TIME-REQUIREMENT
+    \item \textbf{Throughput:} THROUGHPUT-REQUIREMENT
+    \item \textbf{Scalability:} SCALABILITY-REQUIREMENT
+\end{itemize}
+\end{constraintbox}
+
+\subsubsection{Security Requirements}
+
+\begin{itemize}
+    \item SECURITY-REQUIREMENT-1
+    \item SECURITY-REQUIREMENT-2
+    %% Add more as needed
+\end{itemize}
+
+\subsubsection{Accessibility Requirements}
+
+%% INSTRUCTION: Foundation mandates accessibility-first design
+\begin{itemize}
+    \item All UI elements SHALL have accessibility identifiers
+    \item All interactive elements SHALL have accessibility labels and hints
+    \item Minimum touch target: 44x44 points
+    \item Dynamic Type support required
+    \item VoiceOver compatibility required
+    \item ADDITIONAL-A11Y-REQUIREMENT
+\end{itemize}
+
+\subsection{Section 3: Data Requirements}
+
+%% INSTRUCTION: Define data models, schemas, and constraints
+
+\subsubsection{Core Data Entities}
+
+\begin{itemize}
+    \item \textbf{ENTITY-1-NAME}: ENTITY-1-DESCRIPTION
+    \item \textbf{ENTITY-2-NAME}: ENTITY-2-DESCRIPTION
+    %% Add more entities as needed
+\end{itemize}
+
+\subsubsection{Data Constraints}
+
+\begin{itemize}
+    \item DATA-CONSTRAINT-1
+    \item DATA-CONSTRAINT-2
+\end{itemize}
+
+%===============================================================================
+% ARTICLE III: ARCHITECTURE
+%===============================================================================
+\section{Article III: Architecture}
+
+\subsection{Section 1: Architectural Pattern}
+
+%% INSTRUCTION: Specify the architectural pattern being used
+%% Foundation default: MVVM-S (Model-View-ViewModel-Style)
+
+This PROJECT-TYPE follows the \textbf{ARCHITECTURE-PATTERN} pattern.
+
+\begin{tcolorbox}[colback=green!5,colframe=secondarygreen,title=Architecture Layers]
+\begin{enumerate}
+    \item \textbf{LAYER-1-NAME}: LAYER-1-DESCRIPTION
+    \item \textbf{LAYER-2-NAME}: LAYER-2-DESCRIPTION
+    \item \textbf{LAYER-3-NAME}: LAYER-3-DESCRIPTION
+    %% Add more layers as needed
+\end{enumerate}
+\end{tcolorbox}
+
+\subsection{Section 2: Component Structure}
+
+%% INSTRUCTION: Define the major components/modules
+
+\subsubsection{Core Components}
+
+\begin{itemize}
+    \item \textbf{COMPONENT-1-NAME}: COMPONENT-1-PURPOSE
+    \item \textbf{COMPONENT-2-NAME}: COMPONENT-2-PURPOSE
+    \item \textbf{COMPONENT-3-NAME}: COMPONENT-3-PURPOSE
+\end{itemize}
+
+\subsubsection{Component Dependencies}
+
+%% INSTRUCTION: Document component relationships
+\begin{verbatim}
+DEPENDENCY-DIAGRAM-ASCII
+\end{verbatim}
+
+\subsection{Section 3: Technology Stack}
+
+%% INSTRUCTION: Specify all technologies to be used
+
+\begin{longtable}{|p{4cm}|p{4cm}|p{6cm}|}
+\hline
+\textbf{Layer} & \textbf{Technology} & \textbf{Justification} \\
+\hline
+\endhead
+
+TECH-LAYER-1 & TECH-CHOICE-1 & TECH-JUSTIFICATION-1 \\
+\hline
+TECH-LAYER-2 & TECH-CHOICE-2 & TECH-JUSTIFICATION-2 \\
+\hline
+%% Add more as needed
+
+\end{longtable}
+
+%===============================================================================
+% ARTICLE IV: USER EXPERIENCE
+%===============================================================================
+\section{Article IV: User Experience}
+
+\subsection{Section 1: User Personas}
+
+%% INSTRUCTION: Define target users
+
+\begin{tcolorbox}[colback=blue!5,colframe=primaryblue,title=Primary Persona: PERSONA-1-NAME]
+\begin{itemize}
+    \item \textbf{Role:} PERSONA-1-ROLE
+    \item \textbf{Goals:} PERSONA-1-GOALS
+    \item \textbf{Pain Points:} PERSONA-1-PAIN-POINTS
+    \item \textbf{Technical Level:} PERSONA-1-TECH-LEVEL
+\end{itemize}
+\end{tcolorbox}
+
+%% Add more personas as needed
+
+\subsection{Section 2: User Flows}
+
+%% INSTRUCTION: Define primary user journeys
+
+\subsubsection{Flow 1: USER-FLOW-1-NAME}
+
+\begin{enumerate}
+    \item USER-FLOW-1-STEP-1
+    \item USER-FLOW-1-STEP-2
+    \item USER-FLOW-1-STEP-3
+    %% Add more steps as needed
+\end{enumerate}
+
+\textbf{Expected Outcome:} USER-FLOW-1-OUTCOME
+
+\subsection{Section 3: UI/UX Standards}
+
+%% INSTRUCTION: Define visual and interaction standards
+
+\begin{itemize}
+    \item \textbf{Design System:} DESIGN-SYSTEM
+    \item \textbf{Color Scheme:} COLOR-SCHEME
+    \item \textbf{Typography:} TYPOGRAPHY-SPEC
+    \item \textbf{Spacing System:} SPACING-SYSTEM
+\end{itemize}
+
+%===============================================================================
+% ARTICLE V: BUSINESS LOGIC
+%===============================================================================
+\section{Article V: Business Logic}
+
+\subsection{Section 1: Core Business Rules}
+
+%% INSTRUCTION: Define the fundamental business rules
+
+\begin{requirementbox}[Business Rules]
+\begin{enumerate}
+    \item \textbf{BR-001}: BUSINESS-RULE-1
+    \item \textbf{BR-002}: BUSINESS-RULE-2
+    \item \textbf{BR-003}: BUSINESS-RULE-3
+    %% Add more rules as needed
+\end{enumerate}
+\end{requirementbox}
+
+\subsection{Section 2: Workflows}
+
+%% INSTRUCTION: Define automated workflows and processes
+
+\subsubsection{Workflow 1: WORKFLOW-1-NAME}
+
+\textbf{Trigger:} WORKFLOW-1-TRIGGER
+
+\textbf{Steps:}
+\begin{enumerate}
+    \item WORKFLOW-1-STEP-1
+    \item WORKFLOW-1-STEP-2
+    \item WORKFLOW-1-STEP-3
+\end{enumerate}
+
+\textbf{Output:} WORKFLOW-1-OUTPUT
+
+\subsection{Section 3: State Management}
+
+%% INSTRUCTION: Define state transitions and management
+
+\begin{itemize}
+    \item \textbf{Initial State:} INITIAL-STATE
+    \item \textbf{Valid Transitions:} VALID-TRANSITIONS
+    \item \textbf{Terminal States:} TERMINAL-STATES
+\end{itemize}
+
+%===============================================================================
+% ARTICLE VI: INTEGRATION
+%===============================================================================
+\section{Article VI: Integration}
+
+\subsection{Section 1: API Contracts}
+
+%% INSTRUCTION: Define external and internal APIs
+
+\subsubsection{Exposed APIs}
+
+\begin{longtable}{|p{3cm}|p{2cm}|p{4cm}|p{4cm}|}
+\hline
+\textbf{Endpoint} & \textbf{Method} & \textbf{Description} & \textbf{Response} \\
+\hline
+\endhead
+
+API-ENDPOINT-1 & API-METHOD-1 & API-DESCRIPTION-1 & API-RESPONSE-1 \\
+\hline
+%% Add more endpoints as needed
+
+\end{longtable}
+
+\subsubsection{Consumed APIs}
+
+%% INSTRUCTION: List external dependencies
+
+\begin{itemize}
+    \item \textbf{EXTERNAL-API-1}: EXTERNAL-API-1-PURPOSE
+    \item \textbf{EXTERNAL-API-2}: EXTERNAL-API-2-PURPOSE
+\end{itemize}
+
+\subsection{Section 2: Entanglement Points}
+
+%% INSTRUCTION: Define integration with other micro-apps in constellation
+
+\begin{integrationbox}[Constellation Integration]
+\begin{itemize}
+    \item \textbf{Upstream Dependencies:} UPSTREAM-DEPS
+    \item \textbf{Downstream Consumers:} DOWNSTREAM-CONSUMERS
+    \item \textbf{Shared Data:} SHARED-DATA
+\end{itemize}
+\end{integrationbox}
+
+\subsection{Section 3: Data Contracts}
+
+%% INSTRUCTION: Define data exchange formats
+
+\begin{verbatim}
+DATA-CONTRACT-SCHEMA
+\end{verbatim}
+
+%===============================================================================
+% ARTICLE VII: TESTING REQUIREMENTS
+%===============================================================================
+\section{Article VII: Testing Requirements}
+
+\subsection{Section 1: Testing Strategy}
+
+%% INSTRUCTION: Foundation mandates test-driven generation
+%% Tests must be generated WITH code, not after
+
+\begin{warningbox}[Foundation Testing Mandate]
+\textbf{All code SHALL be generated with corresponding tests.}
+\begin{itemize}
+    \item Tests are generated SIMULTANEOUSLY with implementation
+    \item Tests run IMMEDIATELY after generation
+    \item Code is NOT complete until ALL tests pass
+    \item Maximum 3 debug attempts before human intervention
+\end{itemize}
+\end{warningbox}
+
+\subsection{Section 2: Test Types Required}
+
+\begin{longtable}{|p{3cm}|p{4cm}|p{4cm}|p{2cm}|}
+\hline
+\textbf{Test Type} & \textbf{Scope} & \textbf{Tool/Framework} & \textbf{Coverage} \\
+\hline
+\endhead
+
+Unit Tests & UNIT-TEST-SCOPE & Swift Testing & UNIT-COVERAGE-TARGET \\
+\hline
+Integration Tests & INTEGRATION-TEST-SCOPE & Swift Testing & INT-COVERAGE-TARGET \\
+\hline
+UI Tests & UI-TEST-SCOPE & XCUITest & UI-COVERAGE-TARGET \\
+\hline
+%% Add more test types as needed
+
+\end{longtable}
+
+\subsection{Section 3: Acceptance Criteria}
+
+%% INSTRUCTION: Define what constitutes passing tests
+
+\begin{enumerate}
+    \item All unit tests pass with $\geq$ MIN-UNIT-COVERAGE\% coverage
+    \item All integration tests pass
+    \item All UI tests pass
+    \item All accessibility tests pass
+    \item Performance benchmarks met
+    \item Security scan passes with no critical issues
+\end{enumerate}
+
+%===============================================================================
+% ARTICLE VIII: IMPLEMENTATION ROADMAP
+%===============================================================================
+\section{Article VIII: Implementation Roadmap}
+
+%% INSTRUCTION: This section defines the build strategy for the Planner Agent.
+%% It outlines MVP scope, wave decomposition, and iteration phases.
+%% The Planner Agent uses this to create discrete plans for the pipeline.
+
+\subsection{Section 1: MVP Definition}
+
+%% INSTRUCTION: Define the Minimum Viable Product - the smallest functional version
+%% that delivers core value. This is what gets built FIRST.
+
+\begin{requirementbox}[MVP Scope - What Ships First]
+\textbf{MVP Goal:} MVP-GOAL-STATEMENT
+
+\textbf{Core Features (Must Have for MVP):}
+\begin{enumerate}
+    \item MVP-FEATURE-1
+    \item MVP-FEATURE-2
+    \item MVP-FEATURE-3
+    %% Add minimum features needed for MVP
+\end{enumerate}
+
+\textbf{Excluded from MVP (Deferred):}
+\begin{itemize}
+    \item DEFERRED-FEATURE-1 (Target: VERSION-X)
+    \item DEFERRED-FEATURE-2 (Target: VERSION-Y)
+    %% Features explicitly NOT in MVP
+\end{itemize}
+
+\textbf{MVP Success Criteria:}
+\begin{itemize}
+    \item MVP-SUCCESS-CRITERION-1
+    \item MVP-SUCCESS-CRITERION-2
+\end{itemize}
+\end{requirementbox}
+
+\subsection{Section 2: Wave Decomposition Strategy}
+
+%% INSTRUCTION: Break the implementation into digestible "waves" for the execution pipeline.
+%% Each wave should be completable in a single model context window.
+%% Waves enable parallel execution where dependencies allow.
+
+\begin{tcolorbox}[colback=green!5,colframe=secondarygreen,title=Wave Planning Guidelines]
+\begin{itemize}
+    \item Each wave should be \textbf{self-contained} with clear inputs/outputs
+    \item Target \textbf{one-shot model execution} (minimize context switching)
+    \item Waves should produce \textbf{testable artifacts}
+    \item Independent waves can execute in \textbf{parallel}
+    \item Dependent waves must specify \textbf{explicit prerequisites}
+\end{itemize}
+\end{tcolorbox}
+
+\subsubsection{Wave Structure}
+
+%% INSTRUCTION: Define the waves needed to build this constitution.
+%% Format: Wave ID, Name, Description, Dependencies, Estimated Complexity
+
+\begin{longtable}{|p{1.5cm}|p{3cm}|p{5cm}|p{2.5cm}|p{1.5cm}|}
+\hline
+\textbf{Wave} & \textbf{Name} & \textbf{Deliverables} & \textbf{Dependencies} & \textbf{Size} \\
+\hline
+\endhead
+
+W1 & WAVE-1-NAME & WAVE-1-DELIVERABLES & None (Foundation) & WAVE-1-SIZE \\
+\hline
+W2 & WAVE-2-NAME & WAVE-2-DELIVERABLES & WAVE-2-DEPS & WAVE-2-SIZE \\
+\hline
+W3 & WAVE-3-NAME & WAVE-3-DELIVERABLES & WAVE-3-DEPS & WAVE-3-SIZE \\
+\hline
+W4 & WAVE-4-NAME & WAVE-4-DELIVERABLES & WAVE-4-DEPS & WAVE-4-SIZE \\
+\hline
+W5 & WAVE-5-NAME & WAVE-5-DELIVERABLES & WAVE-5-DEPS & WAVE-5-SIZE \\
+\hline
+%% Add more waves as needed. Size: S (small), M (medium), L (large)
+
+\end{longtable}
+
+\subsubsection{Wave Dependency Graph}
+
+%% INSTRUCTION: ASCII representation of wave dependencies for Stages Agent
+
+\begin{verbatim}
+WAVE-DEPENDENCY-GRAPH-ASCII
+
+Example:
+    [W1: Data Models]
+           |
+    +------+------+
+    |             |
+[W2: API]    [W3: UI Core]
+    |             |
+    +------+------+
+           |
+    [W4: Integration]
+           |
+    [W5: Polish & Deploy]
+\end{verbatim}
+
+\subsection{Section 3: Iteration Phases}
+
+%% INSTRUCTION: Define the release roadmap from MVP through future versions.
+%% Each phase builds on the previous, adding capabilities incrementally.
+
+\subsubsection{Phase 1: MVP (VERSION-MVP)}
+
+\begin{constraintbox}[MVP Release]
+\textbf{Timeline:} MVP-TIMELINE
+
+\textbf{Scope:}
+\begin{itemize}
+    \item MVP-SCOPE-ITEM-1
+    \item MVP-SCOPE-ITEM-2
+    \item MVP-SCOPE-ITEM-3
+\end{itemize}
+
+\textbf{Waves Included:} W1, W2, W3 (adjust as needed)
+
+\textbf{Exit Criteria:}
+\begin{itemize}
+    \item Core functionality operational
+    \item Basic test coverage ($\geq$ 70\%)
+    \item Can be deployed to staging environment
+\end{itemize}
+\end{constraintbox}
+
+\subsubsection{Phase 2: Version 1.0 (VERSION-1-0)}
+
+\begin{tcolorbox}[colback=blue!5,colframe=primaryblue,title=v1.0 Release]
+\textbf{Timeline:} V1-TIMELINE
+
+\textbf{Additions to MVP:}
+\begin{itemize}
+    \item V1-ADDITION-1
+    \item V1-ADDITION-2
+    \item V1-ADDITION-3
+\end{itemize}
+
+\textbf{Waves Included:} W4, W5 (adjust as needed)
+
+\textbf{Exit Criteria:}
+\begin{itemize}
+    \item Full feature set operational
+    \item Test coverage ($\geq$ 80\%)
+    \item Production-ready deployment
+    \item Documentation complete
+\end{itemize}
+\end{tcolorbox}
+
+\subsubsection{Phase 3: Future Iterations (VERSION-2-PLUS)}
+
+%% INSTRUCTION: Outline future enhancements beyond v1.0
+
+\begin{itemize}
+    \item \textbf{v1.1:} V1-1-FEATURES
+    \item \textbf{v1.2:} V1-2-FEATURES
+    \item \textbf{v2.0:} V2-0-FEATURES (major iteration)
+\end{itemize}
+
+\subsection{Section 4: Critical Path Analysis}
+
+%% INSTRUCTION: Identify the longest dependency chain and potential bottlenecks.
+%% This helps the Stages Agent optimize parallel execution.
+
+\begin{warningbox}[Critical Path]
+\textbf{Longest Dependency Chain:}
+\begin{verbatim}
+CRITICAL-PATH-SEQUENCE
+Example: W1 → W2 → W4 → W5 (estimated: X days)
+\end{verbatim}
+
+\textbf{Bottlenecks:}
+\begin{itemize}
+    \item BOTTLENECK-1: BOTTLENECK-1-MITIGATION
+    \item BOTTLENECK-2: BOTTLENECK-2-MITIGATION
+\end{itemize}
+
+\textbf{Parallelization Opportunities:}
+\begin{itemize}
+    \item PARALLEL-OPP-1 (e.g., W2 and W3 can run simultaneously)
+    \item PARALLEL-OPP-2
+\end{itemize}
+\end{warningbox}
+
+\subsection{Section 5: Risk Assessment}
+
+%% INSTRUCTION: Identify implementation risks and mitigation strategies.
+%% Helps the Optimization Agent make informed decisions.
+
+\begin{longtable}{|p{3cm}|p{2cm}|p{2cm}|p{5cm}|}
+\hline
+\textbf{Risk} & \textbf{Likelihood} & \textbf{Impact} & \textbf{Mitigation} \\
+\hline
+\endhead
+
+RISK-1-NAME & RISK-1-LIKELIHOOD & RISK-1-IMPACT & RISK-1-MITIGATION \\
+\hline
+RISK-2-NAME & RISK-2-LIKELIHOOD & RISK-2-IMPACT & RISK-2-MITIGATION \\
+\hline
+RISK-3-NAME & RISK-3-LIKELIHOOD & RISK-3-IMPACT & RISK-3-MITIGATION \\
+\hline
+%% Likelihood: Low, Medium, High
+%% Impact: Low, Medium, High, Critical
+
+\end{longtable}
+
+\subsection{Section 6: Planner Agent Directives}
+
+%% INSTRUCTION: Specific instructions for the Planner Agent when processing this constitution.
+
+\begin{integrationbox}[Planner Agent Instructions]
+\textbf{Plan Generation Rules:}
+\begin{enumerate}
+    \item Generate one plan folder per wave (plan1/ for W1, etc.)
+    \item Each wave plan must include corresponding test specifications
+    \item Respect dependency order when numbering plans
+    \item Mark independent waves for parallel execution in stages.md
+    \item Include decision\_log.md in each plan folder
+\end{enumerate}
+
+\textbf{Wave Sizing Guidelines:}
+\begin{itemize}
+    \item \textbf{Small (S):} Single component, $<$500 lines, 1-2 files
+    \item \textbf{Medium (M):} Multiple components, 500-1500 lines, 3-5 files
+    \item \textbf{Large (L):} Complex feature, 1500+ lines, 5+ files (consider splitting)
+\end{itemize}
+
+\textbf{Test Requirements per Wave:}
+\begin{itemize}
+    \item Unit tests for all new functions/methods
+    \item Integration tests for cross-component interactions
+    \item UI tests for user-facing changes (if applicable)
+\end{itemize}
+
+\textbf{Special Considerations:}
+\begin{itemize}
+    \item PLANNER-DIRECTIVE-1
+    \item PLANNER-DIRECTIVE-2
+\end{itemize}
+\end{integrationbox}
+
+%===============================================================================
+% ARTICLE IX: DEPLOYMENT
+%===============================================================================
+\section{Article IX: Deployment}
+
+\subsection{Section 1: Deployment Strategy}
+
+%% INSTRUCTION: Define how the system will be deployed
+
+\begin{itemize}
+    \item \textbf{Strategy:} DEPLOYMENT-STRATEGY
+    \item \textbf{Environment:} DEPLOYMENT-ENVIRONMENT
+    \item \textbf{Frequency:} DEPLOYMENT-FREQUENCY
+\end{itemize}
+
+\subsection{Section 2: Prerequisites}
+
+%% INSTRUCTION: Define what must be true before deployment
+
+\begin{enumerate}
+    \item DEPLOYMENT-PREREQ-1
+    \item DEPLOYMENT-PREREQ-2
+    \item DEPLOYMENT-PREREQ-3
+\end{enumerate}
+
+\subsection{Section 3: Rollback Plan}
+
+%% INSTRUCTION: Define rollback procedures
+
+\begin{warningbox}[Rollback Procedure]
+\begin{enumerate}
+    \item ROLLBACK-STEP-1
+    \item ROLLBACK-STEP-2
+    \item ROLLBACK-STEP-3
+\end{enumerate}
+\end{warningbox}
+
+%===============================================================================
+% ARTICLE X: MAINTENANCE
+%===============================================================================
+\section{Article X: Maintenance}
+
+\subsection{Section 1: Monitoring}
+
+%% INSTRUCTION: Define monitoring and alerting
+
+\begin{itemize}
+    \item \textbf{Metrics:} KEY-METRICS
+    \item \textbf{Alerts:} ALERT-CONDITIONS
+    \item \textbf{Dashboards:} DASHBOARD-REQUIREMENTS
+\end{itemize}
+
+\subsection{Section 2: Support}
+
+\begin{itemize}
+    \item \textbf{SLA:} SLA-DEFINITION
+    \item \textbf{Escalation Path:} ESCALATION-PATH
+\end{itemize}
+
+\subsection{Section 3: Amendment Process}
+
+%% INSTRUCTION: Define how changes are made post-deployment
+
+\begin{enumerate}
+    \item Create Amendment document describing changes
+    \item Reference affected Constitution sections
+    \item Submit for review and approval
+    \item Planner processes amendment
+    \item Affected components regenerated
+    \item Tests validate changes
+    \item Deploy incrementally
+\end{enumerate}
+
+%===============================================================================
+% APPENDICES
+%===============================================================================
+\appendix
+
+\section{Appendix A: Glossary}
+
+%% INSTRUCTION: Define domain-specific terms
+
+\begin{longtable}{|p{4cm}|p{10cm}|}
+\hline
+\textbf{Term} & \textbf{Definition} \\
+\hline
+\endhead
+
+TERM-1 & DEFINITION-1 \\
+\hline
+TERM-2 & DEFINITION-2 \\
+\hline
+%% Add more terms as needed
+
+\end{longtable}
+
+\section{Appendix B: References}
+
+%% INSTRUCTION: List external references, documentation, standards
+
+\begin{enumerate}
+    \item REFERENCE-1
+    \item REFERENCE-2
+    %% Add more references as needed
+\end{enumerate}
+
+\section{Appendix C: Change Log}
+
+%% INSTRUCTION: Track constitution changes
+
+\begin{longtable}{|p{2cm}|p{2cm}|p{3cm}|p{6cm}|}
+\hline
+\textbf{Version} & \textbf{Date} & \textbf{Author} & \textbf{Changes} \\
+\hline
+\endhead
+
+VERSION & \today & AUTHOR & Initial constitution \\
+\hline
+%% Add more changes as needed
+
+\end{longtable}
+
+%===============================================================================
+% SIGNATURE BLOCK
+%===============================================================================
+\section*{Approval}
+
+\vspace{1cm}
+
+\begin{tcolorbox}[colback=gray!5,colframe=neutralgray]
+\textbf{Constitution Approval}
+
+\vspace{0.5cm}
+
+This constitution has been reviewed and approved for execution by the Foundation pipeline.
+
+\vspace{1cm}
+
+\begin{tabular}{p{6cm}p{6cm}}
+\hrulefill & \hrulefill \\
+\textbf{Author/Owner} & \textbf{Date} \\
+AUTHOR & \today \\
+\end{tabular}
+
+\vspace{1cm}
+
+\begin{tabular}{p{6cm}p{6cm}}
+\hrulefill & \hrulefill \\
+\textbf{Reviewer} & \textbf{Date} \\
+REVIEWER & \\
+\end{tabular}
+\end{tcolorbox}
+
+%===============================================================================
+% DOCUMENT END
+%===============================================================================
+\end{document}

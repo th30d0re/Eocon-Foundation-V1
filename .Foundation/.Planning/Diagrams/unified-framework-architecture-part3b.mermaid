@@ -1,0 +1,24 @@
+flowchart TD
+    TestDriven1["Test-Driven Generation<br/>Code + Tests Simultaneously"] --> RunTests1["Run Tests Immediately"]
+    TestDriven2["Test-Driven Generation<br/>Code + Tests Simultaneously"] --> RunTests2["Run Tests Immediately"]
+
+    RunTests1 --> Validate1{"Tests Pass?"}
+    RunTests2 --> Validate2{"Tests Pass?"}
+
+    Validate1 -->|Fail| Debug1["Debug Code + Tests<br/>Max 3 Attempts"]
+    Validate2 -->|Fail| Debug2["Debug Code + Tests<br/>Max 3 Attempts"]
+
+    Debug1 --> RunTests1
+    Debug2 --> RunTests2
+
+    Validate1 -->|Pass| Complete1["Wave Complete"]
+    Validate2 -->|Pass| Complete2["Wave Complete"]
+
+    Complete1 --> Integration["Cross-Wave Integration"]
+    Complete2 --> Integration
+
+    Integration --> Constellation["Complete Constellation<br/>Business Deployed"]
+
+    style TestDriven1 fill:#9c27b0,color:#ffffff,stroke:#ffffff
+    style TestDriven2 fill:#9c27b0,color:#ffffff,stroke:#ffffff
+    style Constellation fill:#1b5e20,color:#ffffff,stroke:#ffffff

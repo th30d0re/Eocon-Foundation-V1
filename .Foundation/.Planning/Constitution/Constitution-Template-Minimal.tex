@@ -1,0 +1,301 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% FOUNDATION CONSTITUTION TEMPLATE - MINIMAL
+%% Version: 1.0
+%% Purpose: Lightweight template for simple micro-apps and services
+%% 
+%% USE THIS TEMPLATE WHEN:
+%% - Project is a single micro-app (not a constellation)
+%% - Scope is limited and well-defined
+%% - No complex integrations required
+%% - Backend-only service with no UI
+%%
+%% USE FULL TEMPLATE WHEN:
+%% - Building a constellation (multiple micro-apps)
+%% - Complex user experience requirements
+%% - Multiple integration points
+%% - Compliance requirements (HIPAA, SOC2, etc.)
+%%
+%% PLACEHOLDER FORMAT: ALL-CAPS-WITH-DASHES
+%% Example: PROJECT-NAME, FR-DESCRIPTION-1, etc.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[12pt,letterpaper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+% Colors
+\definecolor{primaryblue}{RGB}{0,102,204}
+\definecolor{secondarygreen}{RGB}{0,153,76}
+\definecolor{accentorange}{RGB}{255,102,0}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{PROJECT-NAME}
+\lhead{Constitution}
+\rfoot{Page \thepage}
+\setlength{\headheight}{14.49998pt}
+
+% Title formatting
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{primaryblue}}{\thesection}{1em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{secondarygreen}}{\thesubsection}{1em}{}
+
+% Hyperlinks
+\hypersetup{
+    colorlinks=true,
+    linkcolor=primaryblue,
+    urlcolor=accentorange,
+    pdftitle={PROJECT-NAME Constitution}
+}
+
+\begin{document}
+
+%-------------------------------------------------------------------------------
+% HEADER
+%-------------------------------------------------------------------------------
+\begin{center}
+{\Huge\bfseries PROJECT-NAME}\\[0.3cm]
+{\Large PROJECT-TYPE Constitution}\\[0.5cm]
+{\normalsize Version VERSION \textbar{} \today{} \textbar{} AUTHOR}
+\end{center}
+
+\vspace{0.5cm}
+
+\begin{tcolorbox}[colback=gray!10,colframe=primaryblue]
+\textbf{Abstract:} ABSTRACT-TEXT-HERE
+\end{tcolorbox}
+
+\tableofcontents
+\newpage
+
+%===============================================================================
+% 1. PURPOSE
+%===============================================================================
+\section{Purpose}
+
+\subsection{Mission}
+MISSION-STATEMENT-HERE
+
+\subsection{Scope}
+
+\textbf{In Scope:}
+\begin{itemize}
+    \item IN-SCOPE-1
+    \item IN-SCOPE-2
+    \item IN-SCOPE-3
+\end{itemize}
+
+\textbf{Out of Scope:}
+\begin{itemize}
+    \item OUT-OF-SCOPE-1
+    \item OUT-OF-SCOPE-2
+\end{itemize}
+
+\subsection{Success Criteria}
+\begin{enumerate}
+    \item SUCCESS-CRITERION-1
+    \item SUCCESS-CRITERION-2
+    \item SUCCESS-CRITERION-3
+\end{enumerate}
+
+%===============================================================================
+% 2. REQUIREMENTS
+%===============================================================================
+\section{Requirements}
+
+\subsection{Functional Requirements}
+
+\begin{enumerate}
+    \item \textbf{FR-001 FR-NAME-1}: FR-DESCRIPTION-1
+    \item \textbf{FR-002 FR-NAME-2}: FR-DESCRIPTION-2
+    \item \textbf{FR-003 FR-NAME-3}: FR-DESCRIPTION-3
+    %% Add more as needed
+\end{enumerate}
+
+\subsection{Non-Functional Requirements}
+
+\begin{itemize}
+    \item \textbf{Performance:} PERFORMANCE-REQUIREMENT
+    \item \textbf{Security:} SECURITY-REQUIREMENT
+    \item \textbf{Accessibility:} All UI elements SHALL have accessibility identifiers, labels, and hints. Minimum touch target 44x44 points.
+\end{itemize}
+
+\subsection{Data Model}
+
+\begin{itemize}
+    \item \textbf{ENTITY-1}: ENTITY-1-FIELDS
+    \item \textbf{ENTITY-2}: ENTITY-2-FIELDS
+\end{itemize}
+
+%===============================================================================
+% 3. ARCHITECTURE
+%===============================================================================
+\section{Architecture}
+
+\subsection{Pattern}
+This project follows the \textbf{ARCHITECTURE-PATTERN} pattern.
+
+\subsection{Components}
+\begin{itemize}
+    \item \textbf{COMPONENT-1}: COMPONENT-1-PURPOSE
+    \item \textbf{COMPONENT-2}: COMPONENT-2-PURPOSE
+    \item \textbf{COMPONENT-3}: COMPONENT-3-PURPOSE
+\end{itemize}
+
+\subsection{Technology Stack}
+\begin{itemize}
+    \item \textbf{Frontend:} FRONTEND-TECH
+    \item \textbf{Backend:} BACKEND-TECH
+    \item \textbf{Database:} DATABASE-TECH
+    \item \textbf{Testing:} TESTING-TECH
+\end{itemize}
+
+%===============================================================================
+% 4. BUSINESS LOGIC
+%===============================================================================
+\section{Business Logic}
+
+\subsection{Core Rules}
+\begin{enumerate}
+    \item \textbf{BR-001}: BUSINESS-RULE-1
+    \item \textbf{BR-002}: BUSINESS-RULE-2
+    \item \textbf{BR-003}: BUSINESS-RULE-3
+\end{enumerate}
+
+\subsection{Primary Workflow}
+
+\textbf{WORKFLOW-NAME}:
+\begin{enumerate}
+    \item WORKFLOW-STEP-1
+    \item WORKFLOW-STEP-2
+    \item WORKFLOW-STEP-3
+    \item WORKFLOW-STEP-4
+\end{enumerate}
+
+%===============================================================================
+% 5. INTEGRATION (Optional - remove if standalone)
+%===============================================================================
+\section{Integration}
+
+\subsection{APIs}
+\begin{itemize}
+    \item \textbf{API-ENDPOINT-1} (API-METHOD-1): API-DESCRIPTION-1
+    \item \textbf{API-ENDPOINT-2} (API-METHOD-2): API-DESCRIPTION-2
+\end{itemize}
+
+\subsection{Dependencies}
+\begin{itemize}
+    \item DEPENDENCY-1: DEPENDENCY-1-PURPOSE
+    \item DEPENDENCY-2: DEPENDENCY-2-PURPOSE
+\end{itemize}
+
+%===============================================================================
+% 6. IMPLEMENTATION ROADMAP
+%===============================================================================
+\section{Implementation Roadmap}
+
+%% INSTRUCTION: Define MVP and build sequence for Planner Agent
+
+\subsection{MVP Definition}
+
+\textbf{MVP Goal:} MVP-GOAL-STATEMENT
+
+\textbf{MVP Features (Must Have):}
+\begin{enumerate}
+    \item MVP-FEATURE-1
+    \item MVP-FEATURE-2
+    \item MVP-FEATURE-3
+\end{enumerate}
+
+\textbf{Deferred to Later Versions:}
+\begin{itemize}
+    \item DEFERRED-FEATURE-1
+    \item DEFERRED-FEATURE-2
+\end{itemize}
+
+\subsection{Wave Decomposition}
+
+%% INSTRUCTION: Break implementation into discrete waves for pipeline execution
+
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{Wave} & \textbf{Name} & \textbf{Deliverables} & \textbf{Dependencies} \\
+\hline
+W1 & WAVE-1-NAME & WAVE-1-DELIVERABLES & None \\
+\hline
+W2 & WAVE-2-NAME & WAVE-2-DELIVERABLES & W1 \\
+\hline
+W3 & WAVE-3-NAME & WAVE-3-DELIVERABLES & W1, W2 \\
+\hline
+\end{tabular}
+
+\subsection{Critical Path}
+
+\textbf{Build Sequence:} W1 $\rightarrow$ W2 $\rightarrow$ W3
+
+\textbf{Parallel Opportunities:} PARALLEL-WAVES (e.g., W2a and W2b can run together)
+
+%===============================================================================
+% 7. TESTING (MANDATORY)
+%===============================================================================
+\section{Testing}
+
+\begin{tcolorbox}[colback=orange!5,colframe=accentorange,title=Foundation Testing Mandate]
+\begin{itemize}
+    \item Tests generated SIMULTANEOUSLY with code
+    \item Tests run IMMEDIATELY after generation
+    \item Code NOT complete until ALL tests pass
+    \item Maximum 3 debug attempts before human intervention
+\end{itemize}
+\end{tcolorbox}
+
+\subsection{Test Coverage}
+\begin{itemize}
+    \item \textbf{Unit Tests:} $\geq$ UNIT-COVERAGE\% coverage using Swift Testing
+    \item \textbf{Integration Tests:} INTEGRATION-TEST-SCOPE
+    \item \textbf{UI Tests:} XCUITest for all user flows (if applicable)
+\end{itemize}
+
+\subsection{Acceptance Criteria}
+\begin{enumerate}
+    \item All unit tests pass
+    \item All integration tests pass
+    \item Accessibility audit passes
+    \item Performance benchmarks met
+\end{enumerate}
+
+%===============================================================================
+% 8. DEPLOYMENT
+%===============================================================================
+\section{Deployment}
+
+\begin{itemize}
+    \item \textbf{Environment:} DEPLOYMENT-ENVIRONMENT
+    \item \textbf{Strategy:} DEPLOYMENT-STRATEGY
+    \item \textbf{Prerequisites:} DEPLOYMENT-PREREQUISITES
+\end{itemize}
+
+%===============================================================================
+% CHANGE LOG
+%===============================================================================
+\section*{Change Log}
+
+\begin{tabular}{|l|l|l|p{8cm}|}
+\hline
+\textbf{Version} & \textbf{Date} & \textbf{Author} & \textbf{Changes} \\
+\hline
+VERSION & \today & AUTHOR & Initial constitution \\
+\hline
+\end{tabular}
+
+\end{document}

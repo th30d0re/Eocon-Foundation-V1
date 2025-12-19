@@ -1,0 +1,64 @@
+# Build artifacts and logs
+Artifacts/
+*.log
+logs/
+*.build/
+*.xcworkspace/
+DerivedData/
+
+# Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcworkspace/xcshareddata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# Session and cache files
+session_context.md
+*.cache
+
+# Environment variables
+.env
+.env.local
+
+# Personal notes (if any)
+notes/
+TODO.md
+*.notes
+

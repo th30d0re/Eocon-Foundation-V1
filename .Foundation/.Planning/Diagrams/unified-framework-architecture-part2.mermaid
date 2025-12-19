@@ -1,0 +1,21 @@
+flowchart TD
+    Plan1Waves["Plan1/waves/<br/>wave1, wave2...waveN"] --> QuestionAgent["Question Agent<br/>Phase 2"]
+    Plan2Waves["Plan2/waves/<br/>wave1, wave2...waveN"] --> QuestionAgent
+    PlanNWaves["PlanN/waves/<br/>wave1, wave2...waveN"] --> QuestionAgent
+
+    QuestionAgent --> Questions["Questions.md<br/>Ambiguities Identified"]
+    QuestionAgent --> DecisionLog1["Decision Log<br/>Autonomous Decisions"]
+
+    Questions --> OptimizationAgent["Optimization Agent<br/>Phase 3<br/>(Senior Engineer)"]
+    DecisionLog1 --> OptimizationAgent
+
+    OptimizationAgent --> HistoricalAnalysis["Historical Analysis<br/>Guides/, Design/, Docs/"]
+    HistoricalAnalysis --> OptimizationAgent
+
+    OptimizationAgent --> OptimizedPlan1["Optimized Plan1<br/>Enhanced Tests<br/>Decision Log"]
+    OptimizationAgent --> OptimizedPlan2["Optimized Plan2<br/>Enhanced Tests<br/>Decision Log"]
+    OptimizationAgent --> OptimizedPlanN["Optimized PlanN<br/>Enhanced Tests<br/>Decision Log"]
+
+    style QuestionAgent fill:#7b1fa2,color:#ffffff,stroke:#ffffff
+    style OptimizationAgent fill:#d32f2f,color:#ffffff,stroke:#ffffff
+    style Questions fill:#f3e5f5,color:#000000,stroke:#000000

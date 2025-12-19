@@ -1,0 +1,42 @@
+flowchart TD
+    OptimizedPlan1["Optimized Plan1<br/>Enhanced Tests<br/>Decision Log"] --> StagesAgent["Stages Agent<br/>Phase 4"]
+    OptimizedPlan2["Optimized Plan2<br/>Enhanced Tests<br/>Decision Log"] --> StagesAgent
+    OptimizedPlanN["Optimized PlanN<br/>Enhanced Tests<br/>Decision Log"] --> StagesAgent
+
+    StagesAgent --> DependencyAnalysis["Dependency Analysis<br/>DAG Construction"]
+    DependencyAnalysis --> StagesMD["stages.md<br/>Execution Strategy<br/>Parallel Stages"]
+
+    StagesMD --> Phase5["Phase 5: Parallel Execution<br/>Test-Driven Generation"]
+
+    Phase5 --> Stage1["Stage 1: Parallel Waves<br/>Wave1, Wave3<br/>Agents A, B, C"]
+    Phase5 --> Stage2["Stage 2: Dependent Waves<br/>Wave4, Wave5, Wave8<br/>Agents D, E, F"]
+
+    Stage1 --> TestDriven1["Test-Driven Generation<br/>Code + Tests Simultaneously"]
+    Stage2 --> TestDriven2["Test-Driven Generation<br/>Code + Tests Simultaneously"]
+
+    TestDriven1 --> RunTests1["Run Tests Immediately"]
+    TestDriven2 --> RunTests2["Run Tests Immediately"]
+
+    RunTests1 --> Validate1{"Tests Pass?"}
+    RunTests2 --> Validate2{"Tests Pass?"}
+
+    Validate1 -->|Fail| Debug1["Debug Code + Tests<br/>Max 3 Attempts"]
+    Validate2 -->|Fail| Debug2["Debug Code + Tests<br/>Max 3 Attempts"]
+
+    Debug1 --> RunTests1
+    Debug2 --> RunTests2
+
+    Validate1 -->|Pass| Complete1["Wave Complete"]
+    Validate2 -->|Pass| Complete2["Wave Complete"]
+
+    Complete1 --> Integration["Cross-Wave Integration"]
+    Complete2 --> Integration
+
+    Integration --> Constellation["Complete Constellation<br/>Business Deployed"]
+
+    style StagesAgent fill:#5d4037,color:#ffffff,stroke:#ffffff
+    style Phase5 fill:#ff6f00,color:#ffffff,stroke:#ffffff
+    style TestDriven1 fill:#9c27b0,color:#ffffff,stroke:#ffffff
+    style TestDriven2 fill:#9c27b0,color:#ffffff,stroke:#ffffff
+    style Constellation fill:#1b5e20,color:#ffffff,stroke:#ffffff
+    style StagesMD fill:#fff9c4,color:#000000,stroke:#000000

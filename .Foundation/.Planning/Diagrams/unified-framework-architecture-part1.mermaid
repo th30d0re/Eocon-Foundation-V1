@@ -1,0 +1,28 @@
+flowchart TD
+    Speech([Speech Audio]) --> Whisper["Whisper Algorithm<br/>Speech-to-Text"]
+    Whisper --> TextFile["Text File<br/>Raw Speech Content"]
+
+    TextFile --> ConstitutionAgent["Constitution Agent<br/>Phase 0"]
+
+    ConstitutionAgent --> C0["C0: Root Constitution<br/>Main App Idea<br/>Constellation Structure"]
+    ConstitutionAgent --> C1["C1: App Constitution<br/>Micro-app 1"]
+    ConstitutionAgent --> C2["C2: App Constitution<br/>Micro-app 2"]
+    ConstitutionAgent --> CN["CN: App Constitution<br/>Micro-app N"]
+
+    C0 --> PlannerAgent["Planner Agent<br/>Phase 1"]
+    C1 --> PlannerAgent
+    C2 --> PlannerAgent
+    CN --> PlannerAgent
+
+    PlannerAgent --> Plan1["Plan1 Folder<br/>plan1.md + test1.md"]
+    PlannerAgent --> Plan2["Plan2 Folder<br/>plan2.md + test2.md"]
+    PlannerAgent --> PlanN["PlanN Folder<br/>planN.md + testN.md"]
+
+    Plan1 --> Plan1Waves["Plan1/waves/<br/>wave1, wave2...waveN"]
+    Plan2 --> Plan2Waves["Plan2/waves/<br/>wave1, wave2...waveN"]
+    PlanN --> PlanNWaves["PlanN/waves/<br/>wave1, wave2...waveN"]
+
+    style Speech fill:#1e88e5,color:#ffffff,stroke:#ffffff
+    style ConstitutionAgent fill:#f57c00,color:#ffffff,stroke:#ffffff
+    style PlannerAgent fill:#388e3c,color:#ffffff,stroke:#ffffff
+    style C0 fill:#fff3e0,color:#000000,stroke:#000000
