@@ -47,6 +47,7 @@ LOGS_DIR=""  # Set dynamically based on run
 # Build configuration
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-Debug}"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-}"
+AUTO_DETECTED_BUILD_PATH=""  # Auto-detected Build folder in script directory
 XCODE_PROJECT=""
 XCODE_WORKSPACE=""
 SCHEME=""
@@ -106,6 +107,7 @@ OPTIONS:
     --workspace <path>      Path to .xcworkspace (overrides --project)
     --configuration <cfg>   Build configuration (default: Debug)
     --derived-data <path>   Custom DerivedData path
+                            Auto-detects: {script_dir}/Build if exists
     --artifacts-dir <dir>   Artifacts output directory (default: Artifacts/)
     --logs-dir <dir>        Use specific logs directory (skips auto-creation)
     --skip-lint             Skip SwiftLint on uncommitted changes
@@ -394,6 +396,28 @@ detect_xcode_project() {
         return 0
     fi
 
+    return 1
+}
+
+# Auto-detect Build folder in script directory
+detect_build_folder() {
+    # Only auto-detect if DERIVED_DATA_PATH is not already set
+    if [ -n "$DERIVED_DATA_PATH" ]; then
+        log_verbose "Using provided derived data path: $DERIVED_DATA_PATH"
+        return 0
+    fi
+
+    # Check for Build folder in script directory
+    local build_dir="${SCRIPT_DIR}/Build"
+    
+    if [ -d "$build_dir" ]; then
+        AUTO_DETECTED_BUILD_PATH="$build_dir"
+        DERIVED_DATA_PATH="$build_dir"
+        log_info "Auto-detected Build folder: $build_dir"
+        return 0
+    fi
+
+    log_verbose "No Build folder found in script directory, using default"
     return 1
 }
 
@@ -695,6 +719,9 @@ main() {
 
     # Setup logs directory
     setup_logs_dir
+
+    # Auto-detect Build folder in script directory (if not already set)
+    detect_build_folder || true  # Non-fatal
 
     # Validate Xcode project/workspace
     if ! detect_xcode_project; then

@@ -23,8 +23,18 @@ set -euo pipefail
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+# When script is in PATH, use current working directory as project root
+# Otherwise, calculate from script location
+if [ -n "${BUILDAGENT_USE_CWD:-}" ] || [ "${PWD}" != "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" ]; then
+    # Script is likely in PATH, use current working directory
+    PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
+else
+    # Script is run from its own directory, calculate relative path
+    PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="$PWD"  # Current working directory where user invoked the command
 
 # Load helper libraries
 HELPERS_LIB="${PROJECT_ROOT}/.foundation/lib/helpers.sh"
@@ -70,6 +80,9 @@ TARGET_ID=""
 DESTINATION=""
 SCHEME=""
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-Debug}"
+DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-}"
+XCODE_WORKSPACE=""  # Auto-detected workspace path
+XCODE_PROJECT=""    # Auto-detected project path
 
 # Repair loop configuration
 MAX_REPAIR_ATTEMPTS="${MAX_REPAIR_ATTEMPTS:-3}"
@@ -79,7 +92,9 @@ CURRENT_ATTEMPT=0
 SESSION_ID=""
 SESSION_FILE=""
 CURSOR_CHAT_ID=""  # Cursor CLI chat session ID for --resume
-CURSOR_CMD=""      # Detected Cursor CLI command (cursor-agent or cursor)
+AI_PROVIDER="${AI_PROVIDER:-cursor}"  # AI CLI provider: cursor, claude, codex, gemini
+AI_CMD=""          # Detected AI CLI command
+AI_MODEL="${AI_MODEL:-}"  # Specific AI model (provider-dependent)
 
 # Flags
 VERBOSE="${VERBOSE:-false}"
@@ -259,7 +274,16 @@ trap cleanup_spinner EXIT INT TERM
 
 show_usage() {
     cat << EOF
-Phase 5: BuildAgent - Code Generation & Build Verification
+Phase 5: BuildAgent - AI-Powered Code Generation & Build Verification
+
+DESCRIPTION:
+    BuildAgent orchestrates AI-powered code generation with automatic build
+    verification and repair loops. Supports multiple AI providers with auto-
+    detection of project configuration.
+    
+    PROJECT ROOT:
+    When script is in PATH, it uses your current working directory (PWD) as
+    the project root. You can override with: export PROJECT_ROOT=/path/to/project
 
 USAGE:
     $0 [OPTIONS]
@@ -272,23 +296,57 @@ INPUT OPTIONS (at least one required):
 
 CONTEXT OPTIONS:
     --context <path>        MD file or directory with MD files (can be repeated)
-    --swift-docs <path>     Path to Swift documentation (default: Docs/swiftDocs)
-    --no-swift-docs         Skip Swift docs context
+    --swift-docs <path>     Path to Swift documentation (auto-detected if not provided)
+    --no-swift-docs         Skip Swift docs context (disables auto-detection)
+    
+    Auto-detection searches these locations:
+      • Docs/swiftDocs, docs/swiftDocs
+      • Documentation/swiftDocs, documentation/swiftDocs
+      • .foundation/docs/swiftDocs, .Foundation/docs/swiftDocs
+      • And more...
+
+AI PROVIDER OPTIONS:
+    --ai-provider <name>    AI CLI provider to use (default: cursor)
+                            
+                            Supported providers:
+                              cursor  - Cursor AI (default)
+                              claude  - Anthropic Claude
+                              codex   - OpenAI Codex
+                              gemini  - Google Gemini
+                              aider   - Aider AI pair programming
+                            
+                            Auto-installation:
+                              If a provider is not installed, the script will
+                              attempt to install it using Cursor AI, then retry
+                              your command automatically!
+                            
+                            Auto-approval flags (for unattended operation):
+                              cursor → --force
+                              claude → --dangerously-skip-permissions
+                              codex  → --full-auto
+                              gemini → --yolo
+                              aider  → --yes
+                            
+    --ai-model <model>      Specific AI model to use (provider-dependent)
+                            Example: --ai-model gemini-2.0-pro
 
 BUILD OPTIONS:
     --target-id <id>        Device/Simulator UDID (e.g., 00008150-001D5822210A401C)
     --destination <dest>    Full destination string (overrides --target-id)
                             Example: "platform=iOS Simulator,name=iPhone 16"
-    --scheme <scheme>       Xcode scheme to build
+    --scheme <scheme>       Xcode scheme to build (auto-detected if not provided)
+                            Auto-detection searches for .xcworkspace or .xcodeproj
     --configuration <cfg>   Build configuration (default: Debug)
+    --derived-data <path>   Custom DerivedData/build folder path
+                            Auto-detects: phase5/Build folder if exists
     --skip-lint             Skip SwiftLint checks
 
 EXECUTION OPTIONS:
     --max-attempts <n>      Max repair attempts (default: 3)
     --artifacts-dir <dir>   Artifacts output directory
-    --stream                Stream Cursor CLI output in real-time
-          --yolo                  Automation mode: max-attempts=10, verbose, skip-chat-id, streaming
-     --skip-chat-id          Skip cursor chat ID capture (faster, but no session resume)
+    --stream                Stream AI CLI output in real-time
+    --yolo                  Automation mode: max-attempts=10, verbose, skip-chat-id, streaming
+    --skip-chat-id          Skip cursor chat ID capture (faster, but no session resume)
     --dry-run               Show what would be done without executing
     --verbose               Enable verbose output
     --help                  Show this help message
@@ -302,35 +360,104 @@ EXIT CODES:
 OUTPUTS:
     logs/build.log              - Build success log
     logs/error.log              - Error details (on failure)
-    logs/coder.log              - Cursor CLI output
+    logs/coder.log              - AI CLI output
     status/success.txt          - On successful completion
     status/human_intervention.md - When human help needed
 
+AUTHENTICATION:
+    Each AI provider requires authentication. If you see an authentication
+    error, the script will provide provider-specific setup instructions.
+    
+    Quick setup:
+      cursor: Already authenticated if Cursor IDE is logged in
+      claude: export ANTHROPIC_API_KEY=sk-ant-...
+      codex:  export OPENAI_API_KEY=sk-...
+      gemini: export GOOGLE_API_KEY=...
+      aider:  export OPENAI_API_KEY=... or ANTHROPIC_API_KEY=...
+
+ENVIRONMENT VARIABLES:
+    PROJECT_ROOT            Override project root directory (default: $PWD)
+    BUILDAGENT_USE_CWD      Force use of current working directory
+    BUILD_CONFIGURATION     Default build configuration (default: Debug)
+    MAX_REPAIR_ATTEMPTS     Default max repair attempts (default: 3)
+    AI_PROVIDER             Default AI provider (default: cursor)
+
 EXAMPLES:
-    # Generate code from a plan file
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Basic Usage (Auto-Detection)                                        │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    # Minimal - auto-detects scheme, Swift docs, uses Cursor
+    $0 --plan Plans/plan1/plan1.md
+    
+    # When script is in PATH, run from your project directory
+    cd /path/to/your/project
+    BuildAgent.sh --plan plan.md
+    
+    # Explicitly specify scheme (overrides auto-detection)
     $0 --plan Plans/plan1/plan1.md --scheme MyApp
 
-    # Use prompt string with context
-    $0 --prompt-string "Add a login button" --context Guides/ --scheme MyApp
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Different AI Providers                                               │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    # Use Claude (automatically adds --dangerously-skip-permissions)
+    $0 --plan plan.md --ai-provider claude
+    
+    # Use Gemini with specific model (automatically adds --yolo)
+    $0 --plan plan.md --ai-provider gemini --ai-model gemini-2.0-pro
+    
+    # Use Codex (automatically adds --full-auto)
+    $0 --plan plan.md --ai-provider codex
 
-    # Read prompt from stdin
-    echo "Fix the bug in AuthManager" | $0 --stdin --scheme MyApp
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Build Configuration                                                  │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    # Custom build folder
+    $0 --plan plan.md --derived-data ./CustomBuild
+    
+    # Physical device with Release build
+    $0 --plan plan.md --target-id 00008150-001D5822210A401C --configuration Release
+    
+    # Simulator with specific destination
+    $0 --plan plan.md --destination "platform=iOS Simulator,name=iPhone 16"
 
-    # With physical device target
-    $0 --plan plan.md --target-id 00008150-001D5822210A401C --scheme MyApp
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Input Methods                                                        │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    # From prompt string
+    $0 --prompt-string "Add a login button" --context Guides/
+    
+    # From stdin
+    echo "Fix the bug in AuthManager" | $0 --stdin
+    
+    # With additional context files
+    $0 --plan plan.md --context Docs/ --context Guidelines/
 
-    # With simulator destination
-    $0 --prompt-string "Fix bug" --destination "platform=iOS Simulator,name=iPhone 16" --scheme MyApp
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Automation & CI/CD                                                   │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+    # YOLO mode - 10 retries, verbose, streaming (zero user interaction)
+    $0 --plan plan.md --ai-provider claude --yolo
+    
+    # Custom retry count with automation
+    $0 --plan plan.md --max-attempts 20 --yolo
+    
+    # Stream output in real-time (good for CI/CD logs)
+    $0 --plan plan.md --stream --verbose
 
-    # Build for specific device with Release configuration
-    $0 --plan plan.md --target-id 00008150-001D5822210A401C --scheme MyApp --configuration Release
+NOTES:
+    • Auto-detection is non-fatal; falls back gracefully if nothing found
+    • Auto-approval flags enable unattended operation (use in trusted environments)
+    • Missing AI providers will be auto-installed using Cursor (if available)
+    • All options can be combined as needed
+    • Exit codes are designed for CI/CD integration
 
-        # YOLO mode for long-running automation (10 retries, verbose, streaming, skip chat ID)
-    $0 --plan plan.md --scheme MyApp --yolo
-
-
-    # YOLO mode with custom retry count
-    $0 --plan plan.md --scheme MyApp --max-attempts 20 --yolo
+For more information, see: .Foundation/docs/BuildAgent.md
 EOF
 }
 
@@ -370,7 +497,7 @@ setup_directories() {
     log_verbose "Logs directory: $LOGS_DIR"
     log_verbose "Status directory: $STATUS_DIR"
     log_verbose "Session ID: $SESSION_ID"
-    log_verbose "Cursor CLI Command: $CURSOR_CMD"
+    log_verbose "AI CLI Command: $AI_CMD"
 }
 
 validate_inputs() {
@@ -406,6 +533,21 @@ validate_inputs() {
         done
     fi
 
+    # Auto-detect Swift docs if not disabled
+    if [ -z "$SWIFT_DOCS_PATH" ] || [ "$SWIFT_DOCS_PATH" != "DISABLED" ]; then
+        detect_swift_docs || true  # Non-fatal if not found
+    fi
+
+    # Auto-detect Xcode project/workspace (always run, even if scheme is provided)
+    detect_xcode_project_path || true  # Non-fatal if not found
+
+    # Auto-detect scheme if not provided
+    if [ -z "$SCHEME" ]; then
+        if ! detect_scheme; then
+            log_warning "Could not auto-detect scheme. Build may require --scheme parameter."
+        fi
+    fi
+
     # Check BuildLint.sh exists
     if [ ! -x "$BUILD_LINT_SCRIPT" ]; then
         spinner_error "Validating configuration"
@@ -413,21 +555,422 @@ validate_inputs() {
         return 1
     fi
 
-    # Check Cursor CLI is available (try both formats)
-    if command -v cursor-agent >/dev/null 2>&1; then
-        CURSOR_CMD="cursor-agent"
-        log_verbose "Using cursor-agent command"
-    elif command -v cursor >/dev/null 2>&1; then
-        CURSOR_CMD="cursor agent"
-        log_verbose "Using cursor agent command"
-    else
+    # Detect and configure AI provider
+    if ! detect_ai_provider; then
         spinner_error "Validating configuration"
-        log_error "Cursor CLI not found. Install from https://cursor.sh"
         return 1
     fi
 
     spinner_success "Validating configuration"
     return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-detection Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Auto-detect Swift documentation path
+detect_swift_docs() {
+    if [ -n "$SWIFT_DOCS_PATH" ] && [ -d "$SWIFT_DOCS_PATH" ]; then
+        log_verbose "Using provided Swift docs path: $SWIFT_DOCS_PATH"
+        return 0
+    fi
+
+    # Common locations to search for Swift documentation
+    local search_paths=(
+        "${WORK_DIR}/swiftDocs"
+        "${WORK_DIR}/Docs/swiftDocs"
+        "${WORK_DIR}/docs/swiftDocs"
+        "${WORK_DIR}/Documentation/swiftDocs"
+        "${WORK_DIR}/documentation/swiftDocs"
+        "${PROJECT_ROOT}/Docs/swiftDocs"
+        "${PROJECT_ROOT}/docs/swiftDocs"
+        "${PROJECT_ROOT}/Documentation/swiftDocs"
+        "${PROJECT_ROOT}/documentation/swiftDocs"
+        "${PROJECT_ROOT}/Docs"
+        "${PROJECT_ROOT}/docs"
+        "${PROJECT_ROOT}/Documentation"
+        "${PROJECT_ROOT}/documentation"
+        "${PROJECT_ROOT}/.foundation/docs/swiftDocs"
+        "${PROJECT_ROOT}/.Foundation/docs/swiftDocs"
+    )
+
+    for path in "${search_paths[@]}"; do
+        if [ -d "$path" ]; then
+            # Check if directory has .md files
+            if find "$path" -maxdepth 2 -name "*.md" -type f 2>/dev/null | grep -q .; then
+                SWIFT_DOCS_PATH="$path"
+                log_info "Auto-detected Swift docs: $SWIFT_DOCS_PATH"
+                return 0
+            fi
+        fi
+    done
+
+    log_verbose "No Swift documentation found, continuing without docs context"
+    SWIFT_DOCS_PATH=""
+    return 1
+}
+
+# Auto-detect Xcode project/workspace path (separate from scheme detection)
+detect_xcode_project_path() {
+    log_verbose "Searching for Xcode project/workspace..."
+
+    # Look for workspace first (preferred) - search in WORK_DIR first, then PROJECT_ROOT
+    local workspace
+    workspace=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+    
+    if [ -z "$workspace" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+        workspace=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+    fi
+    
+    local project=""
+    if [ -z "$workspace" ]; then
+        # Fall back to project - search in WORK_DIR first, then PROJECT_ROOT
+        project=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+        
+        if [ -z "$project" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+            project=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+        fi
+    fi
+
+    if [ -n "$workspace" ]; then
+        log_info "Found Xcode workspace: $workspace"
+        XCODE_WORKSPACE="$workspace"
+        return 0
+    elif [ -n "$project" ]; then
+        log_info "Found Xcode project: $project"
+        XCODE_PROJECT="$project"
+        return 0
+    else
+        log_verbose "No Xcode workspace or project found in $WORK_DIR"
+        if [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+            log_verbose "Also checked: $PROJECT_ROOT"
+        fi
+        return 1
+    fi
+}
+
+# Auto-detect Xcode scheme by looking for .xcodeproj or .xcworkspace
+detect_scheme() {
+    if [ -n "$SCHEME" ]; then
+        log_verbose "Using provided scheme: $SCHEME"
+        return 0
+    fi
+
+    log_verbose "Attempting to auto-detect Xcode scheme..."
+
+    # Use already-detected project/workspace if available
+    local workspace="$XCODE_WORKSPACE"
+    local project="$XCODE_PROJECT"
+    
+    # If not already detected, search now
+    if [ -z "$workspace" ] && [ -z "$project" ]; then
+        workspace=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+        
+        if [ -z "$workspace" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+            workspace=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+        fi
+        
+        if [ -z "$workspace" ]; then
+            project=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+            
+            if [ -z "$project" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+                project=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+            fi
+        fi
+    fi
+
+    # Build xcodebuild argument
+    local xcode_arg=""
+    if [ -n "$workspace" ]; then
+        xcode_arg="-workspace \"$workspace\""
+        log_verbose "Using workspace: $workspace"
+        XCODE_WORKSPACE="$workspace"
+    elif [ -n "$project" ]; then
+        xcode_arg="-project \"$project\""
+        log_verbose "Using project: $project"
+        XCODE_PROJECT="$project"
+    else
+        log_verbose "No Xcode workspace or project found in $WORK_DIR"
+        if [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+            log_verbose "Also checked: $PROJECT_ROOT"
+        fi
+        return 1
+    fi
+
+    # Get list of schemes
+    local schemes_output
+    schemes_output=$(eval "xcodebuild $xcode_arg -list 2>/dev/null" || true)
+
+    # Extract first scheme from output
+    SCHEME=$(echo "$schemes_output" | awk '/Schemes:/{found=1; next} found && /^[[:space:]]+[^[:space:]]/{print $1; exit}')
+
+    if [ -n "$SCHEME" ]; then
+        log_info "Auto-detected scheme: $SCHEME"
+        return 0
+    fi
+
+    log_verbose "Could not auto-detect scheme"
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Provider Detection & Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Attempt to install missing AI provider using Cursor CLI
+install_ai_provider() {
+    local provider="$1"
+    local install_cmd="$2"
+    
+    log_warning "AI provider '$provider' not found"
+    
+    # Check if cursor-agent is available for installation
+    if ! command -v cursor-agent >/dev/null 2>&1; then
+        log_error "Cannot auto-install: cursor-agent not available"
+        log_info "Please install manually: $install_cmd"
+        return 1
+    fi
+    
+    echo "" >&2
+    log_section "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_section "AUTO-INSTALLATION ATTEMPT"
+    log_section "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "" >&2
+    
+    log_info "Attempting to install '$provider' using Cursor AI..."
+    log_info "Install command: $install_cmd"
+    echo "" >&2
+    
+    # Create installation prompt for Cursor
+    local install_prompt="Please install the $provider CLI tool by running this command:
+
+$install_cmd
+
+After running the command, verify the installation by running:
+command -v ${provider}
+
+Respond with 'INSTALLED' when complete."
+    
+    # Save prompt to temp file
+    local prompt_file="/tmp/buildagent_install_${provider}_$$.txt"
+    echo "$install_prompt" > "$prompt_file"
+    
+    log_info "Asking Cursor AI to install $provider..."
+    
+    # Run cursor-agent to install (in WORK_DIR where user invoked the command)
+    local cursor_output
+    if cursor_output=$(cd "$WORK_DIR" && cursor-agent --force --print --output-format text "$install_prompt" 2>&1); then
+        log_verbose "Cursor response received"
+        
+        # Wait a moment for installation to complete
+        sleep 2
+        
+        # Check if the provider is now available
+        if command -v "$provider" >/dev/null 2>&1; then
+            echo "" >&2
+            log_success "✓ Successfully installed $provider!"
+            echo "" >&2
+            rm -f "$prompt_file"
+            return 0
+        else
+            log_warning "Installation attempted but $provider not found in PATH"
+            log_info "You may need to restart your terminal or source your profile"
+            log_info "Manual installation: $install_cmd"
+            rm -f "$prompt_file"
+            return 1
+        fi
+    else
+        log_error "Cursor AI installation attempt failed"
+        log_info "Please install manually: $install_cmd"
+        rm -f "$prompt_file"
+        return 1
+    fi
+}
+
+# Detect and configure AI CLI provider
+detect_ai_provider() {
+    local provider
+    provider=$(echo "$AI_PROVIDER" | tr '[:upper:]' '[:lower:]')  # Convert to lowercase
+    
+    log_verbose "Detecting AI provider: $provider"
+    
+    case "$provider" in
+        cursor)
+            if command -v cursor-agent >/dev/null 2>&1; then
+                AI_CMD="cursor-agent"
+                log_info "Using Cursor AI (cursor-agent)"
+                return 0
+            elif command -v cursor >/dev/null 2>&1; then
+                AI_CMD="cursor agent"
+                log_info "Using Cursor AI (cursor)"
+                return 0
+            else
+                log_error "Cursor CLI not found. Install from https://cursor.sh"
+                log_info "Cursor is required - it cannot auto-install itself"
+                return 1
+            fi
+            ;;
+        
+        claude)
+            if command -v claude >/dev/null 2>&1; then
+                AI_CMD="claude"
+                log_info "Using Claude CLI (with --dangerously-skip-permissions)"
+                return 0
+            else
+                # Attempt auto-installation
+                if install_ai_provider "claude" "npm install -g @anthropic-ai/claude-cli"; then
+                    AI_CMD="claude"
+                    log_info "Using Claude CLI (with --dangerously-skip-permissions)"
+                    return 0
+                fi
+                return 1
+            fi
+            ;;
+        
+        codex|openai)
+            if command -v codex >/dev/null 2>&1; then
+                AI_CMD="codex"
+                log_info "Using OpenAI Codex CLI (with --full-auto)"
+                return 0
+            elif command -v openai >/dev/null 2>&1; then
+                AI_CMD="openai"
+                log_info "Using OpenAI CLI (with --full-auto)"
+                return 0
+            else
+                # Attempt auto-installation
+                if install_ai_provider "openai" "pip install openai-cli"; then
+                    if command -v openai >/dev/null 2>&1; then
+                        AI_CMD="openai"
+                        log_info "Using OpenAI CLI (with --full-auto)"
+                        return 0
+                    fi
+                fi
+                return 1
+            fi
+            ;;
+        
+        gemini|google)
+            if command -v gemini >/dev/null 2>&1; then
+                AI_CMD="gemini"
+                log_info "Using Google Gemini CLI (with --yolo)"
+                return 0
+            elif command -v gcloud >/dev/null 2>&1; then
+                AI_CMD="gcloud ai"
+                log_info "Using Google Cloud AI CLI (with --yolo)"
+                return 0
+            else
+                # Attempt auto-installation (gemini CLI)
+                if install_ai_provider "gemini" "npm install -g @google/generative-ai-cli"; then
+                    AI_CMD="gemini"
+                    log_info "Using Google Gemini CLI (with --yolo)"
+                    return 0
+                fi
+                return 1
+            fi
+            ;;
+        
+        aider)
+            if command -v aider >/dev/null 2>&1; then
+                AI_CMD="aider"
+                log_info "Using Aider CLI"
+                return 0
+            else
+                # Attempt auto-installation
+                if install_ai_provider "aider" "pip install aider-chat"; then
+                    AI_CMD="aider"
+                    log_info "Using Aider CLI"
+                    return 0
+                fi
+                return 1
+            fi
+            ;;
+        
+        *)
+            log_error "Unknown AI provider: $provider"
+            log_info "Supported providers: cursor, claude, codex, gemini, aider"
+            return 1
+            ;;
+    esac
+}
+
+# Check for authentication errors in AI CLI output
+check_auth_error() {
+    local output="$1"
+    local provider
+    provider=$(echo "$AI_PROVIDER" | tr '[:upper:]' '[:lower:]')  # Convert to lowercase
+    
+    # Common authentication error patterns
+    local auth_patterns=(
+        "not authenticated"
+        "authentication failed"
+        "not logged in"
+        "please sign in"
+        "please login"
+        "invalid api key"
+        "api key not found"
+        "unauthorized"
+        "401"
+        "403 Forbidden"
+        "authentication required"
+        "token expired"
+        "credentials not found"
+        "no api key"
+    )
+    
+    local output_lower
+    output_lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')  # Convert to lowercase for case-insensitive matching
+    
+    for pattern in "${auth_patterns[@]}"; do
+        if echo "$output_lower" | grep -q "$pattern"; then
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_error "AUTHENTICATION ERROR DETECTED"
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "" >&2
+            log_error "The AI CLI ($provider) requires authentication."
+            echo "" >&2
+            
+            # Provider-specific instructions
+            case "$provider" in
+                cursor)
+                    log_info "To authenticate Cursor:"
+                    echo "  1. Open Cursor application" >&2
+                    echo "  2. Sign in with your account" >&2
+                    echo "  3. Try running: cursor-agent --help" >&2
+                    ;;
+                claude)
+                    log_info "To authenticate Claude CLI:"
+                    echo "  1. Get your API key from: https://console.anthropic.com/" >&2
+                    echo "  2. Set environment variable: export ANTHROPIC_API_KEY=your_key" >&2
+                    echo "  3. Or run: claude auth login" >&2
+                    ;;
+                codex|openai)
+                    log_info "To authenticate OpenAI:"
+                    echo "  1. Get your API key from: https://platform.openai.com/api-keys" >&2
+                    echo "  2. Set environment variable: export OPENAI_API_KEY=your_key" >&2
+                    echo "  3. Or run: openai auth login" >&2
+                    ;;
+                gemini|google)
+                    log_info "To authenticate Gemini:"
+                    echo "  1. Get your API key from: https://makersuite.google.com/app/apikey" >&2
+                    echo "  2. Set environment variable: export GOOGLE_API_KEY=your_key" >&2
+                    echo "  3. Or run: gcloud auth login" >&2
+                    ;;
+                aider)
+                    log_info "To authenticate Aider:"
+                    echo "  1. Get your API key from your AI provider" >&2
+                    echo "  2. Set environment variable (e.g., OPENAI_API_KEY, ANTHROPIC_API_KEY)" >&2
+                    echo "  3. Or run: aider --help for setup instructions" >&2
+                    ;;
+            esac
+            
+            echo "" >&2
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            return 0  # Auth error detected
+        fi
+    done
+    
+    return 1  # No auth error
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -462,13 +1005,20 @@ gather_context() {
     local has_context=false
 
     # Check if there's any context to gather
-    if [ -d "$SWIFT_DOCS_PATH" ] || [ ${#CONTEXT_PATHS[@]} -gt 0 ]; then
+    if [ -n "$SWIFT_DOCS_PATH" ] && [ "$SWIFT_DOCS_PATH" != "DISABLED" ] && [ -d "$SWIFT_DOCS_PATH" ]; then
         has_context=true
+    fi
+    
+    if [ ${#CONTEXT_PATHS[@]} -gt 0 ]; then
+        has_context=true
+    fi
+
+    if [ "$has_context" = true ]; then
         start_spinner "Gathering context"
     fi
 
     # Add Swift docs if available
-    if [ -d "$SWIFT_DOCS_PATH" ]; then
+    if [ -n "$SWIFT_DOCS_PATH" ] && [ "$SWIFT_DOCS_PATH" != "DISABLED" ] && [ -d "$SWIFT_DOCS_PATH" ]; then
         log_verbose "Adding Swift docs from: $SWIFT_DOCS_PATH"
         local swift_docs_content
         swift_docs_content=$(read_md_files_from_dir "$SWIFT_DOCS_PATH")
@@ -630,9 +1180,10 @@ update_session_context() {
     } >> "$SESSION_FILE"
 }
 
-# Get the latest Cursor chat ID from cursor-agent ls
+# Get the latest chat ID (currently only supported for Cursor)
 get_latest_chat_id() {
-    if [ "$CURSOR_CMD" = "cursor-agent" ]; then
+    # Only supported for cursor-agent format
+    if [ "$AI_PROVIDER" = "cursor" ] && [ "$AI_CMD" = "cursor-agent" ]; then
         # Try to get the latest chat ID with timeout to prevent hangs
         local chat_list
         # Use timeout (2 seconds max - should be near instant)
@@ -643,7 +1194,6 @@ get_latest_chat_id() {
             chat_list=$(cd "$PROJECT_ROOT" && gtimeout 2 cursor-agent ls 2>/dev/null | head -1)
         else
             # No timeout available, skip to avoid potential hang
-            # cursor-agent ls is unreliable, session resume not critical
             log_verbose "timeout command not available, skipping chat ID capture"
             echo ""
             return
@@ -654,62 +1204,104 @@ get_latest_chat_id() {
             echo "$chat_list" | awk '{print $1}' | head -1
         fi
     fi
-    # Return empty if not available or using cursor agent format
+    # Return empty if not available or not supported for this provider
     echo ""
 }
 
-# Run Cursor CLI with session support
-run_cursor_cli() {
+# Run AI CLI with session support
+run_ai_cli() {
     local prompt="$1"
     local is_followup="${2:-false}"
     local output_file="${LOGS_DIR}/coder_attempt_${CURRENT_ATTEMPT}.log"
 
-    log_attempt "Running Cursor CLI (session: $SESSION_ID)..."
+    log_attempt "Running ${AI_PROVIDER} AI CLI (session: $SESSION_ID)..."
 
     if [ "$DRY_RUN" = "true" ]; then
-        log_info "[DRY RUN] Would run: $CURSOR_CMD --force --print ..."
+        log_info "[DRY RUN] Would run: $AI_CMD ..."
         if [ "$is_followup" = "true" ] && [ -n "$CURSOR_CHAT_ID" ]; then
             log_info "[DRY RUN] Would resume chat: $CURSOR_CHAT_ID"
         fi
-        echo "[DRY RUN] Cursor CLI would be invoked here" > "$output_file"
+        echo "[DRY RUN] AI CLI would be invoked here" > "$output_file"
         return 0
     fi
 
     # Save prompt for debugging
     echo "$prompt" > "${LOGS_DIR}/prompt_attempt_${CURRENT_ATTEMPT}.txt"
 
-    local cursor_exit_code=0
-    local cursor_cmd_full=""
+    local ai_exit_code=0
+    local ai_cmd_full=""
+    local provider_lower
+    provider_lower=$(echo "$AI_PROVIDER" | tr '[:upper:]' '[:lower:]')
 
-    # Build command based on whether this is a follow-up with session resume
-    if [ "$is_followup" = "true" ] && [ -n "$CURSOR_CHAT_ID" ] && [ "$CURSOR_CMD" = "cursor-agent" ]; then
-        # Resume existing session
-        log_verbose "Resuming Cursor chat session: $CURSOR_CHAT_ID"
-        cursor_cmd_full="$CURSOR_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text \"$prompt\""
-    else
-        # New session (first attempt)
-        if [ "$CURSOR_CMD" = "cursor-agent" ]; then
-            cursor_cmd_full="$CURSOR_CMD --force --print --output-format text \"$prompt\""
-        else
-            # cursor agent format (space-separated) - try to add --force if supported
-            cursor_cmd_full="$CURSOR_CMD --force --print --output-format text \"$prompt\""
-        fi
-        log_verbose "Starting new Cursor chat session"
-    fi
+    # Build command based on provider
+    case "$provider_lower" in
+        cursor)
+            # Build command based on whether this is a follow-up with session resume
+            if [ "$is_followup" = "true" ] && [ -n "$CURSOR_CHAT_ID" ] && [ "$AI_CMD" = "cursor-agent" ]; then
+                # Resume existing session
+                log_verbose "Resuming Cursor chat session: $CURSOR_CHAT_ID"
+                ai_cmd_full="$AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text \"$prompt\""
+            else
+                # New session (first attempt)
+                if [ "$AI_CMD" = "cursor-agent" ]; then
+                    ai_cmd_full="$AI_CMD --force --print --output-format text \"$prompt\""
+                else
+                    # cursor agent format (space-separated)
+                    ai_cmd_full="$AI_CMD --force --print --output-format text \"$prompt\""
+                fi
+                log_verbose "Starting new Cursor chat session"
+            fi
+            ;;
+        
+        claude)
+            # Claude CLI format with auto-approval flag
+            ai_cmd_full="$AI_CMD --dangerously-skip-permissions \"$prompt\""
+            log_verbose "Running Claude CLI (with --dangerously-skip-permissions)"
+            ;;
+        
+        codex|openai)
+            # OpenAI/Codex format with full-auto flag
+            ai_cmd_full="$AI_CMD complete --full-auto \"$prompt\""
+            log_verbose "Running OpenAI/Codex CLI (with --full-auto)"
+            ;;
+        
+        gemini|google)
+            # Gemini format with yolo flag
+            if [ "$AI_CMD" = "gemini" ]; then
+                ai_cmd_full="$AI_CMD generate --yolo \"$prompt\""
+            else
+                ai_cmd_full="$AI_CMD generate-text --yolo --prompt=\"$prompt\""
+            fi
+            log_verbose "Running Gemini CLI (with --yolo)"
+            ;;
+        
+        aider)
+            # Aider format - writes prompt to temp file and uses --yes flag
+            local prompt_file="${LOGS_DIR}/aider_prompt_${CURRENT_ATTEMPT}.txt"
+            echo "$prompt" > "$prompt_file"
+            ai_cmd_full="$AI_CMD --yes --message-file \"$prompt_file\""
+            log_verbose "Running Aider CLI"
+            ;;
+        
+        *)
+            log_error "Unknown AI provider: $AI_PROVIDER"
+            return 1
+            ;;
+    esac
 
     # Log session info (for tracking purposes)
     if [ "$is_followup" = "true" ]; then
         log_verbose "Follow-up attempt in session: $SESSION_ID"
         if [ -n "$CURSOR_CHAT_ID" ]; then
-            log_verbose "Using Cursor chat ID: $CURSOR_CHAT_ID"
+            log_verbose "Using chat ID: $CURSOR_CHAT_ID"
         fi
     else
         log_verbose "New session: $SESSION_ID"
     fi
 
     # Run with streaming or spinner
-    local spinner_msg="Generating code"
-    [ "$is_followup" = "true" ] && spinner_msg="Fixing code (attempt $CURRENT_ATTEMPT)"
+    local spinner_msg="Generating code with ${AI_PROVIDER}"
+    [ "$is_followup" = "true" ] && spinner_msg="Fixing code with ${AI_PROVIDER} (attempt $CURRENT_ATTEMPT)"
 
     if [ "$STREAM_OUTPUT" = "true" ]; then
         # Start spinner - it will run on its own line
@@ -719,19 +1311,17 @@ run_cursor_cli() {
         sleep 0.2
         
         # Stream output in real-time (use tee to both display and save)
-        # Print newline to move past spinner line, then stream output
         echo "" >&2
-        echo -e "${CYAN}─── Cursor CLI Output ───${NC}" >&2
+        echo -e "${CYAN}─── ${AI_PROVIDER} CLI Output ───${NC}" >&2
         
         # Spinner continues on its line above while output streams below
-        if (cd "$PROJECT_ROOT" && eval "$cursor_cmd_full" 2>&1) | tee "$output_file"; then
-            cursor_exit_code=0
-            # Stop spinner and show success
+        # Run in WORK_DIR (where user invoked the command) not PROJECT_ROOT
+        if (cd "$WORK_DIR" && eval "$ai_cmd_full" 2>&1) | tee "$output_file"; then
+            ai_exit_code=0
             stop_spinner
             spinner_success "$spinner_msg"
         else
-            cursor_exit_code=$?
-            # Stop spinner and show error
+            ai_exit_code=$?
             stop_spinner
             spinner_error "$spinner_msg"
         fi
@@ -742,18 +1332,31 @@ run_cursor_cli() {
         # Use spinner animation
         start_spinner "$spinner_msg"
 
-        if (cd "$PROJECT_ROOT" && eval "$cursor_cmd_full" > "$output_file" 2>&1); then
-            cursor_exit_code=0
+        # Run in WORK_DIR (where user invoked the command) not PROJECT_ROOT
+        if (cd "$WORK_DIR" && eval "$ai_cmd_full" > "$output_file" 2>&1); then
+            ai_exit_code=0
             spinner_success "$spinner_msg"
         else
-            cursor_exit_code=$?
+            ai_exit_code=$?
             spinner_error "$spinner_msg"
         fi
     fi
 
-    # On first attempt, try to capture the chat ID for future resume
-    # Note: This is optional and can be skipped with --skip-chat-id
-    if [ "$SKIP_CHAT_ID_CAPTURE" = "false" ] && [ "$is_followup" = "false" ] && [ -z "$CURSOR_CHAT_ID" ] && [ "$CURSOR_CMD" = "cursor-agent" ] && [ $cursor_exit_code -eq 0 ]; then
+    # Check for authentication errors in the output
+    if [ -f "$output_file" ]; then
+        local ai_output
+        ai_output=$(cat "$output_file")
+        
+        if check_auth_error "$ai_output"; then
+            # Auth error detected, update session context
+            update_session_context "$CURRENT_ATTEMPT" "auth_failed" "Authentication error with $AI_PROVIDER"
+            log_error "Please authenticate with $AI_PROVIDER and try again"
+            return 1
+        fi
+    fi
+
+    # On first attempt with Cursor, try to capture the chat ID for future resume
+    if [ "$SKIP_CHAT_ID_CAPTURE" = "false" ] && [ "$AI_PROVIDER" = "cursor" ] && [ "$is_followup" = "false" ] && [ -z "$CURSOR_CHAT_ID" ] && [ "$AI_CMD" = "cursor-agent" ] && [ $ai_exit_code -eq 0 ]; then
         log_verbose "Attempting to capture Cursor chat ID..."
         
         # Show spinner while capturing chat ID (can take a few seconds)
@@ -775,18 +1378,18 @@ run_cursor_cli() {
     fi
 
     # Update session context
-    if [ $cursor_exit_code -eq 0 ]; then
-        update_session_context "$CURRENT_ATTEMPT" "completed" "Code generated successfully"
+    if [ $ai_exit_code -eq 0 ]; then
+        update_session_context "$CURRENT_ATTEMPT" "completed" "Code generated successfully with $AI_PROVIDER"
     else
-        update_session_context "$CURRENT_ATTEMPT" "failed" "Cursor CLI exit code: $cursor_exit_code"
+        update_session_context "$CURRENT_ATTEMPT" "failed" "${AI_PROVIDER} CLI exit code: $ai_exit_code"
     fi
 
-    if [ $cursor_exit_code -ne 0 ]; then
-        log_error "Cursor CLI failed with exit code: $cursor_exit_code"
+    if [ $ai_exit_code -ne 0 ]; then
+        log_error "${AI_PROVIDER} CLI failed with exit code: $ai_exit_code"
         return 1
     fi
 
-    log_success "Cursor CLI completed"
+    log_success "${AI_PROVIDER} CLI completed"
     return 0
 }
 
@@ -811,6 +1414,13 @@ run_build_lint() {
     local lint_args=()
     lint_args+=("--logs-dir" "$LOGS_DIR")
 
+    # Pass the Xcode project/workspace if we detected it
+    if [ -n "${XCODE_WORKSPACE:-}" ]; then
+        lint_args+=("--workspace" "$XCODE_WORKSPACE")
+    elif [ -n "${XCODE_PROJECT:-}" ]; then
+        lint_args+=("--project" "$XCODE_PROJECT")
+    fi
+
     if [ -n "$TARGET_ID" ]; then
         lint_args+=("--target-id" "$TARGET_ID")
     fi
@@ -827,12 +1437,23 @@ run_build_lint() {
         lint_args+=("--configuration" "$BUILD_CONFIGURATION")
     fi
 
+    if [ -n "$DERIVED_DATA_PATH" ]; then
+        lint_args+=("--derived-data" "$DERIVED_DATA_PATH")
+    fi
+
     if [ "$SKIP_LINT" = "true" ]; then
         lint_args+=("--skip-lint")
     fi
 
     if [ "$VERBOSE" = "true" ]; then
         lint_args+=("--verbose")
+    fi
+
+    # Debug: Show what we're passing to BuildLint
+    if [ "$VERBOSE" = "true" ]; then
+        log_verbose "BuildLint arguments: ${lint_args[*]}"
+        log_verbose "XCODE_WORKSPACE=${XCODE_WORKSPACE:-<not set>}"
+        log_verbose "XCODE_PROJECT=${XCODE_PROJECT:-<not set>}"
     fi
 
     # Run BuildLint.sh with spinner or streaming
@@ -1007,7 +1628,8 @@ run_build_loop() {
         echo "# Build Session: $SESSION_ID"
         echo "Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
         echo "Max attempts: $MAX_REPAIR_ATTEMPTS"
-        echo "Cursor CLI Command: $CURSOR_CMD"
+        echo "AI Provider: $AI_PROVIDER"
+        echo "AI CLI Command: $AI_CMD"
         if [ -n "$CURSOR_CHAT_ID" ]; then
             echo "Cursor Chat ID: $CURSOR_CHAT_ID"
         fi
@@ -1033,10 +1655,10 @@ run_build_loop() {
             prompt=$(build_followup_prompt "$error_feedback" "$CURRENT_ATTEMPT" "$input_content" "$context")
         fi
 
-        # Run Cursor CLI with session
-        if ! run_cursor_cli "$prompt" "$is_followup"; then
-            log_error "Cursor CLI failed"
-            error_feedback="Cursor CLI invocation failed. Please try again."
+        # Run AI CLI with session
+        if ! run_ai_cli "$prompt" "$is_followup"; then
+            log_error "${AI_PROVIDER} CLI failed"
+            error_feedback="${AI_PROVIDER} CLI invocation failed. Please try again."
             update_session_context "$CURRENT_ATTEMPT" "cursor_failed" "$error_feedback"
             is_followup="true"
             continue
@@ -1103,8 +1725,16 @@ main() {
                 shift 2
                 ;;
             --no-swift-docs)
-                SWIFT_DOCS_PATH=""
+                SWIFT_DOCS_PATH="DISABLED"
                 shift 1
+                ;;
+            --ai-provider)
+                AI_PROVIDER="${2:-}"
+                shift 2
+                ;;
+            --ai-model)
+                AI_MODEL="${2:-}"
+                shift 2
                 ;;
             --target-id)
                 TARGET_ID="${2:-}"
@@ -1120,6 +1750,10 @@ main() {
                 ;;
             --configuration)
                 BUILD_CONFIGURATION="${2:-}"
+                shift 2
+                ;;
+            --derived-data)
+                DERIVED_DATA_PATH="${2:-}"
                 shift 2
                 ;;
             --skip-lint)
@@ -1197,8 +1831,13 @@ main() {
         exit 11
     fi
 
+    log_info "Working Directory: $WORK_DIR"
     log_info "Project Root: $PROJECT_ROOT"
     log_info "Max Repair Attempts: $MAX_REPAIR_ATTEMPTS"
+    log_info "AI Provider: $AI_PROVIDER"
+    if [ -n "$AI_MODEL" ]; then
+        log_info "AI Model: $AI_MODEL"
+    fi
     log_info "Artifacts: $ARTIFACTS_DIR"
     if [ "$YOLO_MODE" = "true" ]; then
         log_info "Mode: YOLO (automation mode active)"
@@ -1214,6 +1853,9 @@ main() {
     fi
     if [ -n "$BUILD_CONFIGURATION" ]; then
         log_info "Configuration: $BUILD_CONFIGURATION"
+    fi
+    if [ -n "$DERIVED_DATA_PATH" ]; then
+        log_info "DerivedData Path: $DERIVED_DATA_PATH"
     fi
     echo "" >&2
 
