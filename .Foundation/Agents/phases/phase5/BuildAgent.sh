@@ -63,7 +63,7 @@ PLAN_FILE=""
 PROMPT_FILE=""
 PROMPT_STRING=""
 CONTEXT_PATHS=()
-SWIFT_DOCS_PATH="${PROJECT_ROOT}/.Foundation/Docs/swiftDocs"
+SWIFT_DOCS_PATH="${PROJECT_ROOT}/Docs/swiftDocs"
 
 # Build configuration (passed to BuildLint.sh)
 TARGET_ID=""
@@ -87,6 +87,7 @@ DRY_RUN="${DRY_RUN:-false}"
 SKIP_LINT="${SKIP_LINT:-false}"
 STREAM_OUTPUT="${STREAM_OUTPUT:-false}"
 SKIP_CHAT_ID_CAPTURE="${SKIP_CHAT_ID_CAPTURE:-false}"  # Skip cursor chat ID capture (can be slow/unreliable)
+YOLO_MODE="${YOLO_MODE:-false}"  # Automation mode: enables verbose, skip-chat-id, stream output
 
 # Spinner state
 SPINNER_PID=""
@@ -271,7 +272,7 @@ INPUT OPTIONS (at least one required):
 
 CONTEXT OPTIONS:
     --context <path>        MD file or directory with MD files (can be repeated)
-    --swift-docs <path>     Path to Swift documentation (default: .Foundation/Docs/swiftDocs)
+    --swift-docs <path>     Path to Swift documentation (default: Docs/swiftDocs)
     --no-swift-docs         Skip Swift docs context
 
 BUILD OPTIONS:
@@ -286,6 +287,8 @@ EXECUTION OPTIONS:
     --max-attempts <n>      Max repair attempts (default: 3)
     --artifacts-dir <dir>   Artifacts output directory
     --stream                Stream Cursor CLI output in real-time
+          --yolo                  Automation mode: max-attempts=10, verbose, skip-chat-id, streaming
+     --skip-chat-id          Skip cursor chat ID capture (faster, but no session resume)
     --dry-run               Show what would be done without executing
     --verbose               Enable verbose output
     --help                  Show this help message
@@ -322,6 +325,12 @@ EXAMPLES:
     # Build for specific device with Release configuration
     $0 --plan plan.md --target-id 00008150-001D5822210A401C --scheme MyApp --configuration Release
 
+        # YOLO mode for long-running automation (10 retries, verbose, streaming, skip chat ID)
+    $0 --plan plan.md --scheme MyApp --yolo
+
+
+    # YOLO mode with custom retry count
+    $0 --plan plan.md --scheme MyApp --max-attempts 20 --yolo
 EOF
 }
 
@@ -1141,6 +1150,18 @@ main() {
                 VERBOSE="true"
                 shift 1
                 ;;
+            --yolo)
+                YOLO_MODE="true"
+                VERBOSE="true"
+                SKIP_CHAT_ID_CAPTURE="true"
+                STREAM_OUTPUT="true"
+                # Increase max attempts to 10 for YOLO mode (unless already set)
+                if [ "$MAX_REPAIR_ATTEMPTS" = "3" ]; then
+                    MAX_REPAIR_ATTEMPTS="10"
+                fi
+                log_info "YOLO mode enabled: verbose + skip-chat-id + streaming + max-attempts=${MAX_REPAIR_ATTEMPTS}"
+                shift 1
+                ;;
             --help|-h)
                 show_usage
                 exit 0
@@ -1179,6 +1200,9 @@ main() {
     log_info "Project Root: $PROJECT_ROOT"
     log_info "Max Repair Attempts: $MAX_REPAIR_ATTEMPTS"
     log_info "Artifacts: $ARTIFACTS_DIR"
+    if [ "$YOLO_MODE" = "true" ]; then
+        log_info "Mode: YOLO (automation mode active)"
+    fi
     if [ -n "$SCHEME" ]; then
         log_info "Scheme: $SCHEME"
     fi
