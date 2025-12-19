@@ -1357,60 +1357,56 @@ run_ai_cli() {
         return 0
     fi
 
-    # Save prompt for debugging
-    echo "$prompt" > "${LOGS_DIR}/prompt_attempt_${CURRENT_ATTEMPT}.txt"
-
     local ai_exit_code=0
     local ai_cmd_full=""
     local provider_lower
     provider_lower=$(echo "$AI_PROVIDER" | tr '[:upper:]' '[:lower:]')
 
-    # Build command based on provider
+    # Write prompt to temp file to avoid shell escaping issues with special characters
+    # This is critical because prompts may contain Swift code with $(), //, etc.
+    # Using printf '%s' to avoid echo interpreting escape sequences
+    local prompt_file="${LOGS_DIR}/prompt_attempt_${CURRENT_ATTEMPT}.txt"
+    printf '%s' "$prompt" > "$prompt_file"
+    
+    # Build command based on provider (all use temp file/stdin for safety)
     case "$provider_lower" in
         cursor)
-            # Build command based on whether this is a follow-up with session resume
+            # cursor-agent reads from stdin when piped
             if [ "$is_followup" = "true" ] && [ -n "$CURSOR_CHAT_ID" ] && [ "$AI_CMD" = "cursor-agent" ]; then
                 # Resume existing session
                 log_verbose "Resuming Cursor chat session: $CURSOR_CHAT_ID"
-                ai_cmd_full="$AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text \"$prompt\""
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text"
             else
                 # New session (first attempt)
-                if [ "$AI_CMD" = "cursor-agent" ]; then
-                    ai_cmd_full="$AI_CMD --force --print --output-format text \"$prompt\""
-                else
-                    # cursor agent format (space-separated)
-                    ai_cmd_full="$AI_CMD --force --print --output-format text \"$prompt\""
-                fi
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --force --print --output-format text"
                 log_verbose "Starting new Cursor chat session"
             fi
             ;;
         
         claude)
-            # Claude CLI format with auto-approval flag
-            ai_cmd_full="$AI_CMD --dangerously-skip-permissions \"$prompt\""
+            # Claude CLI - pipe from file to avoid escaping issues
+            ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --dangerously-skip-permissions -p -"
             log_verbose "Running Claude CLI (with --dangerously-skip-permissions)"
             ;;
         
         codex|openai)
-            # OpenAI/Codex format with full-auto flag
-            ai_cmd_full="$AI_CMD complete --full-auto \"$prompt\""
+            # OpenAI/Codex format with full-auto flag - pipe from file
+            ai_cmd_full="cat \"$prompt_file\" | $AI_CMD complete --full-auto -"
             log_verbose "Running OpenAI/Codex CLI (with --full-auto)"
             ;;
         
         gemini|google)
-            # Gemini format with yolo flag
+            # Gemini format with yolo flag - pipe from file
             if [ "$AI_CMD" = "gemini" ]; then
-                ai_cmd_full="$AI_CMD generate --yolo \"$prompt\""
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD generate --yolo"
             else
-                ai_cmd_full="$AI_CMD generate-text --yolo --prompt=\"$prompt\""
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD generate-text --yolo"
             fi
             log_verbose "Running Gemini CLI (with --yolo)"
             ;;
         
         aider)
-            # Aider format - writes prompt to temp file and uses --yes flag
-            local prompt_file="${LOGS_DIR}/aider_prompt_${CURRENT_ATTEMPT}.txt"
-            echo "$prompt" > "$prompt_file"
+            # Aider format - uses --message-file directly (already safe)
             ai_cmd_full="$AI_CMD --yes --message-file \"$prompt_file\""
             log_verbose "Running Aider CLI"
             ;;

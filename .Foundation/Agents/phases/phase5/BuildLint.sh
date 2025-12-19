@@ -606,6 +606,7 @@ run_xcode_build() {
 
     # Run build and capture output
     local build_output_file="${LOGS_DIR}/xcodebuild_raw.log"
+    local build_filtered_file="${LOGS_DIR}/xcodebuild_filtered.log"
     local start_time
     local end_time
     local duration
@@ -613,11 +614,17 @@ run_xcode_build() {
 
     start_time=$(date +%s)
 
-    # Execute build
+    # Execute build and capture raw output first (preserves exit code)
+    eval "$xcode_cmd" > "$build_output_file" 2>&1 || build_exit_code=$?
+    
+    # Filter out noisy Xcode warnings for display (doesn't affect exit code)
+    # DVTDeviceOperation/DVTBuildVersion: device discovery noise
+    # IDELogStore: internal Xcode logging
+    grep -v -E "(DVTDeviceOperation|DVTBuildVersion|IDELogStore)" "$build_output_file" > "$build_filtered_file" 2>/dev/null || true
+    
+    # Show filtered output in verbose mode
     if [ "$VERBOSE" = "true" ]; then
-        eval "$xcode_cmd" 2>&1 | tee "$build_output_file" || build_exit_code=$?
-    else
-        eval "$xcode_cmd" > "$build_output_file" 2>&1 || build_exit_code=$?
+        cat "$build_filtered_file"
     fi
 
     end_time=$(date +%s)
