@@ -289,6 +289,113 @@ get_uncommitted_swift_files() {
     echo -e "${files}\n${untracked}" | grep -v '^$' | sort -u
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-Installation Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Install Homebrew if not present (macOS/Linux)
+install_homebrew() {
+    if command -v brew >/dev/null 2>&1; then
+        log_verbose "Homebrew already installed"
+        return 0
+    fi
+
+    log_section "Installing Homebrew..."
+    
+    # Check if we're on macOS or Linux
+    local os_type
+    os_type=$(uname -s)
+    
+    if [ "$os_type" = "Darwin" ] || [ "$os_type" = "Linux" ]; then
+        # Official Homebrew installation script
+        # Using NONINTERACTIVE to avoid prompts in automation
+        if NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" 2>&1; then
+            log_success "Homebrew installed successfully"
+            
+            # Add Homebrew to PATH for this session (needed on Linux and Apple Silicon)
+            if [ "$os_type" = "Linux" ]; then
+                eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" 2>/dev/null || true
+            elif [ -f "/opt/homebrew/bin/brew" ]; then
+                # Apple Silicon Mac
+                eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+            fi
+            
+            return 0
+        else
+            log_error "Failed to install Homebrew"
+            log_info "Please install manually: https://brew.sh"
+            return 1
+        fi
+    else
+        log_warning "Homebrew installation not supported on $os_type"
+        return 1
+    fi
+}
+
+# Install SwiftLint via Homebrew
+install_swiftlint() {
+    if command -v swiftlint >/dev/null 2>&1; then
+        log_verbose "SwiftLint already installed: $(swiftlint version 2>/dev/null || echo 'unknown version')"
+        return 0
+    fi
+
+    log_section "Installing SwiftLint..."
+    
+    # Ensure Homebrew is installed first
+    if ! command -v brew >/dev/null 2>&1; then
+        log_info "Homebrew not found, installing first..."
+        if ! install_homebrew; then
+            log_error "Cannot install SwiftLint without Homebrew"
+            return 1
+        fi
+    fi
+    
+    # Install SwiftLint via Homebrew
+    if brew install swiftlint 2>&1; then
+        log_success "SwiftLint installed successfully"
+        
+        # Verify installation
+        if command -v swiftlint >/dev/null 2>&1; then
+            log_info "SwiftLint version: $(swiftlint version 2>/dev/null || echo 'installed')"
+            return 0
+        else
+            log_warning "SwiftLint installed but not in PATH"
+            # Try to find it
+            local brew_prefix
+            brew_prefix=$(brew --prefix 2>/dev/null || echo "/usr/local")
+            if [ -x "${brew_prefix}/bin/swiftlint" ]; then
+                export PATH="${brew_prefix}/bin:$PATH"
+                log_info "Added ${brew_prefix}/bin to PATH"
+                return 0
+            fi
+            return 1
+        fi
+    else
+        log_error "Failed to install SwiftLint"
+        return 1
+    fi
+}
+
+# Ensure SwiftLint is available (install if needed)
+ensure_swiftlint() {
+    if command -v swiftlint >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    log_info "SwiftLint not found, attempting auto-installation..."
+    
+    if install_swiftlint; then
+        return 0
+    else
+        log_warning "Could not auto-install SwiftLint, lint checks will be skipped"
+        return 1
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lint Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Run SwiftLint on uncommitted files
 run_swiftlint() {
     if [ "$SKIP_LINT" = "true" ]; then
@@ -301,10 +408,9 @@ run_swiftlint() {
         return 0
     fi
 
-    # Check if SwiftLint is installed
-    if ! command -v swiftlint >/dev/null 2>&1; then
-        log_warning "SwiftLint not installed, skipping lint checks"
-        log_info "Install with: brew install swiftlint"
+    # Auto-install SwiftLint if not present
+    if ! ensure_swiftlint; then
+        log_warning "SwiftLint not available, skipping lint checks"
         return 0
     fi
 
