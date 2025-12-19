@@ -46,15 +46,20 @@ BuildAgent --plan plan.md --ai-provider claude --yolo
 
 The main build agent that orchestrates AI-powered code generation and verification.
 
-### ✨ New Features
+### ✨ Features
 
 - **🤖 Multi-AI Provider Support**: Choose from Cursor, Claude, Codex, Gemini, or Aider
 - **🔧 Auto-Installation**: Missing providers are installed automatically using Cursor AI
-- **🔍 Auto-Detection**: Automatically finds Swift docs, Xcode schemes, and build folders
+- **🔍 Smart Auto-Detection**: 
+  - Swift documentation (searches working directory first)
+  - Xcode projects/workspaces (always detects, even with --scheme)
+  - Build folders
+  - Git repositories (auto-initializes in YOLO mode)
 - **🔐 Auth Error Detection**: Detects authentication errors and provides setup instructions
 - **⚡ Auto-Approval Flags**: Each provider gets automatic flags for unattended operation
 - **🌍 PATH Support**: Install globally and use from any project directory
 - **📁 Custom Build Folders**: Specify or auto-detect custom build output locations
+- **🔄 Git Auto-Init**: Automatically initializes git repositories in YOLO mode for SwiftLint
 
 ### AI Provider Options
 
@@ -83,6 +88,31 @@ For full documentation, run:
 BuildAgent --help
 ```
 
+### 🔍 Smart Auto-Detection
+
+BuildAgent automatically detects your project structure:
+
+**Swift Documentation:**
+- Searches `swiftDocs/`, `Docs/swiftDocs/`, `Documentation/swiftDocs/` in working directory first
+- Falls back to searching in project root
+- Over 15 search paths checked
+
+**Xcode Projects:**
+- Searches for `.xcworkspace` (preferred) or `.xcodeproj`
+- Always runs detection, even when `--scheme` is provided
+- Searches working directory first, then project root
+- Automatically passes detected paths to BuildLint
+
+**Git Repository:**
+- Checks if git repository exists
+- **YOLO mode**: Automatically runs `git init` if missing
+- Creates initial commit for SwiftLint compatibility
+- Non-fatal: continues if initialization fails
+
+**Build Folders:**
+- Auto-detects `Build/` folder in script directory
+- Can specify custom path with `--derived-data`
+
 ---
 
 ## Requirements
@@ -98,6 +128,7 @@ BuildAgent --help
 
 ### Optional
 - **SwiftLint**: `brew install swiftlint` (for code linting)
+- **Git**: `brew install git` (auto-initialized in YOLO mode if missing repository)
 
 ### Authentication Setup
 
@@ -120,6 +151,14 @@ export GOOGLE_API_KEY=...
 ---
 
 ## Version History
+
+**v2.1** (December 2024)
+- Added automatic Xcode project detection (works even with --scheme provided)
+- Added git repository auto-initialization in YOLO mode
+- Fixed bash 3.2 compatibility (macOS default)
+- Enhanced Swift docs detection to prioritize working directory
+- Improved PATH support with WORK_DIR vs PROJECT_ROOT handling
+- Added comprehensive debug logging
 
 **v2.0** (December 2024)
 - Added multi-AI provider support (Cursor, Claude, Codex, Gemini, Aider)

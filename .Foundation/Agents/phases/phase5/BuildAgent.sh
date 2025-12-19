@@ -541,6 +541,9 @@ validate_inputs() {
     # Auto-detect Xcode project/workspace (always run, even if scheme is provided)
     detect_xcode_project_path || true  # Non-fatal if not found
 
+    # Check/initialize git repository
+    ensure_git_repo || true  # Non-fatal if initialization fails
+
     # Auto-detect scheme if not provided
     if [ -z "$SCHEME" ]; then
         if ! detect_scheme; then
@@ -646,6 +649,55 @@ detect_xcode_project_path() {
         if [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
             log_verbose "Also checked: $PROJECT_ROOT"
         fi
+        return 1
+    fi
+}
+
+# Ensure git repository exists (initialize if needed)
+ensure_git_repo() {
+    # Check if we're in a git repository
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        log_verbose "Git repository found"
+        return 0
+    fi
+    
+    log_warning "No git repository found in $WORK_DIR"
+    log_info "Git repository is recommended for SwiftLint to work properly"
+    
+    # Check if git is available
+    if ! command -v git >/dev/null 2>&1; then
+        log_warning "Git is not installed - skipping initialization"
+        return 1
+    fi
+    
+    # Ask user if they want to initialize (or auto-initialize in YOLO mode)
+    if [ "$YOLO_MODE" = "true" ] || [ "$DRY_RUN" = "true" ]; then
+        log_info "Auto-initializing git repository..."
+        
+        if [ "$DRY_RUN" = "true" ]; then
+            log_info "[DRY RUN] Would run: git init && git add . && git commit -m 'Initial commit'"
+            return 0
+        fi
+        
+        # Initialize git repo
+        if git init >/dev/null 2>&1; then
+            log_success "✓ Initialized empty git repository"
+            
+            # Add all files and make initial commit
+            if git add . >/dev/null 2>&1 && git commit -m "Initial commit by BuildAgent" >/dev/null 2>&1; then
+                log_success "✓ Created initial commit"
+                log_info "Git repository ready for SwiftLint"
+                return 0
+            else
+                log_warning "Git initialized but initial commit failed"
+                return 1
+            fi
+        else
+            log_error "Failed to initialize git repository"
+            return 1
+        fi
+    else
+        log_info "Run 'git init' to initialize a repository for better linting"
         return 1
     fi
 }
