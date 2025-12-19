@@ -62,3 +62,6 @@ notes/
 TODO.md
 *.notes
 
+# Foundation Swift project (now in separate repo: Eocon-Foundation-Swift)
+Foundation/
+
