@@ -573,41 +573,89 @@ validate_inputs() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Auto-detect Swift documentation path
+# Searches up to 5 levels deep for swiftDocs directories, excludes dependency folders,
+# and prioritizes the main project's docs (shortest path)
 detect_swift_docs() {
     if [ -n "$SWIFT_DOCS_PATH" ] && [ -d "$SWIFT_DOCS_PATH" ]; then
         log_verbose "Using provided Swift docs path: $SWIFT_DOCS_PATH"
         return 0
     fi
 
-    # Common locations to search for Swift documentation
-    local search_paths=(
-        "${WORK_DIR}/swiftDocs"
-        "${WORK_DIR}/Docs/swiftDocs"
-        "${WORK_DIR}/docs/swiftDocs"
-        "${WORK_DIR}/Documentation/swiftDocs"
-        "${WORK_DIR}/documentation/swiftDocs"
-        "${PROJECT_ROOT}/Docs/swiftDocs"
-        "${PROJECT_ROOT}/docs/swiftDocs"
-        "${PROJECT_ROOT}/Documentation/swiftDocs"
-        "${PROJECT_ROOT}/documentation/swiftDocs"
-        "${PROJECT_ROOT}/Docs"
-        "${PROJECT_ROOT}/docs"
-        "${PROJECT_ROOT}/Documentation"
-        "${PROJECT_ROOT}/documentation"
-        "${PROJECT_ROOT}/.foundation/docs/swiftDocs"
-        "${PROJECT_ROOT}/.Foundation/docs/swiftDocs"
-    )
+    log_verbose "Searching for Swift documentation..."
 
-    for path in "${search_paths[@]}"; do
-        if [ -d "$path" ]; then
-            # Check if directory has .md files
-            if find "$path" -maxdepth 2 -name "*.md" -type f 2>/dev/null | grep -q .; then
-                SWIFT_DOCS_PATH="$path"
-                log_info "Auto-detected Swift docs: $SWIFT_DOCS_PATH"
-                return 0
-            fi
+    local docs_path=""
+    local search_dirs=("$WORK_DIR")
+    
+    # Also search PROJECT_ROOT if different from WORK_DIR
+    if [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
+        search_dirs+=("$PROJECT_ROOT")
+    fi
+
+    # Search each directory for swiftDocs
+    for search_dir in "${search_dirs[@]}"; do
+        if [ -n "$docs_path" ]; then
+            break
         fi
+        
+        # Find directories named "swiftDocs" or "SwiftDocs", excluding dependency folders
+        # Sort by path length (shortest first = main project)
+        local found_paths
+        found_paths=$(find "$search_dir" -maxdepth 5 -type d \( -name "swiftDocs" -o -name "SwiftDocs" \) \
+            -not -path "*/.build/*" \
+            -not -path "*/Pods/*" \
+            -not -path "*/Carthage/*" \
+            -not -path "*/checkouts/*" \
+            -not -path "*/DerivedData/*" \
+            -not -path "*/Build/*" \
+            -not -path "*/Ref/*" \
+            -not -path "*/Reference/*" \
+            -not -path "*/.planning/*" \
+            2>/dev/null | \
+            awk '{ print length, $0 }' | \
+            sort -n | \
+            cut -d' ' -f2-) || true
+        
+        # Check each found path for .md files, use first valid one
+        while IFS= read -r path; do
+            if [ -n "$path" ] && [ -d "$path" ]; then
+                # Check if at least one .md file exists (use -print -quit to avoid pipefail issues)
+                local first_md
+                first_md=$(find "$path" -maxdepth 2 -name "*.md" -type f -print -quit 2>/dev/null) || true
+                if [ -n "$first_md" ]; then
+                    docs_path="$path"
+                    break
+                fi
+            fi
+        done <<< "$found_paths"
     done
+    
+    # Also check .Foundation directories explicitly (hidden dirs might be missed by main search)
+    if [ -z "$docs_path" ]; then
+        local foundation_paths=(
+            "${WORK_DIR}/.Foundation/Docs/swiftDocs"
+            "${WORK_DIR}/.Foundation/.Foundation/Docs/swiftDocs"
+            "${WORK_DIR}/.foundation/docs/swiftDocs"
+            "${PROJECT_ROOT}/.Foundation/Docs/swiftDocs"
+            "${PROJECT_ROOT}/.Foundation/.Foundation/Docs/swiftDocs"
+            "${PROJECT_ROOT}/.foundation/docs/swiftDocs"
+        )
+        for fpath in "${foundation_paths[@]}"; do
+            if [ -d "$fpath" ]; then
+                local first_md
+                first_md=$(find "$fpath" -maxdepth 2 -name "*.md" -type f -print -quit 2>/dev/null) || true
+                if [ -n "$first_md" ]; then
+                    docs_path="$fpath"
+                    break
+                fi
+            fi
+        done
+    fi
+
+    if [ -n "$docs_path" ]; then
+        SWIFT_DOCS_PATH="$docs_path"
+        log_info "Auto-detected Swift docs: $SWIFT_DOCS_PATH"
+        return 0
+    fi
 
     log_verbose "No Swift documentation found, continuing without docs context"
     SWIFT_DOCS_PATH=""
@@ -615,24 +663,71 @@ detect_swift_docs() {
 }
 
 # Auto-detect Xcode project/workspace path (separate from scheme detection)
+# Searches up to 5 levels deep, excludes dependency directories, and prioritizes
+# the "main" project (shortest path, not in build/dependency folders)
 detect_xcode_project_path() {
     log_verbose "Searching for Xcode project/workspace..."
 
+    # Common directories to exclude (dependencies, caches, etc.)
+    local exclude_patterns=(
+        "*/.*"                    # Hidden directories
+        "*/.build/*"              # Swift Package Manager build
+        "*/Pods/*"                # CocoaPods
+        "*/Carthage/*"            # Carthage
+        "*/checkouts/*"           # SPM checkouts
+        "*/DerivedData/*"         # Xcode derived data
+        "*/Build/*"               # Build folders
+        "*/Docs/*"                # Documentation
+        "*/docs/*"                # Documentation (lowercase)
+        "*/Reference/*"           # Reference projects
+        "*/Ref/*"                 # Reference projects (short)
+        "*/Examples/*"            # Example projects
+        "*/Samples/*"             # Sample projects
+    )
+
+    # Build find exclude arguments
+    local find_excludes=""
+    for pattern in "${exclude_patterns[@]}"; do
+        find_excludes="$find_excludes -not -path \"$pattern\""
+    done
+
+    # Function to find the best (shortest path) project/workspace
+    find_best_xcode_path() {
+        local search_dir="$1"
+        local extension="$2"
+        local max_depth="${3:-5}"
+        
+        # Find all matching paths, sort by path length (shortest first)
+        eval "find \"$search_dir\" -maxdepth $max_depth -name \"*.$extension\" $find_excludes 2>/dev/null" | \
+            awk '{ print length, $0 }' | \
+            sort -n | \
+            cut -d' ' -f2- | \
+            head -1
+    }
+
     # Look for workspace first (preferred) - search in WORK_DIR first, then PROJECT_ROOT
     local workspace
-    workspace=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+    workspace=$(find_best_xcode_path "$WORK_DIR" "xcworkspace" 5)
+    
+    # Exclude project.xcworkspace (inside .xcodeproj) - we want standalone workspaces
+    if [ -n "$workspace" ] && echo "$workspace" | grep -q "\.xcodeproj/"; then
+        workspace=""
+    fi
     
     if [ -z "$workspace" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
-        workspace=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+        workspace=$(find_best_xcode_path "$PROJECT_ROOT" "xcworkspace" 5)
+        if [ -n "$workspace" ] && echo "$workspace" | grep -q "\.xcodeproj/"; then
+            workspace=""
+        fi
     fi
     
     local project=""
     if [ -z "$workspace" ]; then
         # Fall back to project - search in WORK_DIR first, then PROJECT_ROOT
-        project=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+        project=$(find_best_xcode_path "$WORK_DIR" "xcodeproj" 5)
         
         if [ -z "$project" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
-            project=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
+            project=$(find_best_xcode_path "$PROJECT_ROOT" "xcodeproj" 5)
         fi
     fi
 
@@ -715,21 +810,11 @@ detect_scheme() {
     local workspace="$XCODE_WORKSPACE"
     local project="$XCODE_PROJECT"
     
-    # If not already detected, search now
+    # If not already detected, run detect_xcode_project_path first
     if [ -z "$workspace" ] && [ -z "$project" ]; then
-        workspace=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
-        
-        if [ -z "$workspace" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
-            workspace=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcworkspace" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
-        fi
-        
-        if [ -z "$workspace" ]; then
-            project=$(find "$WORK_DIR" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
-            
-            if [ -z "$project" ] && [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
-                project=$(find "$PROJECT_ROOT" -maxdepth 2 -name "*.xcodeproj" -not -path "*/.*" -not -path "*/Pods/*" 2>/dev/null | head -1)
-            fi
-        fi
+        detect_xcode_project_path || true
+        workspace="$XCODE_WORKSPACE"
+        project="$XCODE_PROJECT"
     fi
 
     # Build xcodebuild argument
@@ -737,16 +822,11 @@ detect_scheme() {
     if [ -n "$workspace" ]; then
         xcode_arg="-workspace \"$workspace\""
         log_verbose "Using workspace: $workspace"
-        XCODE_WORKSPACE="$workspace"
     elif [ -n "$project" ]; then
         xcode_arg="-project \"$project\""
         log_verbose "Using project: $project"
-        XCODE_PROJECT="$project"
     else
-        log_verbose "No Xcode workspace or project found in $WORK_DIR"
-        if [ "$WORK_DIR" != "$PROJECT_ROOT" ]; then
-            log_verbose "Also checked: $PROJECT_ROOT"
-        fi
+        log_verbose "No Xcode workspace or project found"
         return 1
     fi
 
@@ -1277,60 +1357,56 @@ run_ai_cli() {
         return 0
     fi
 
-    # Save prompt for debugging
-    echo "$prompt" > "${LOGS_DIR}/prompt_attempt_${CURRENT_ATTEMPT}.txt"
-
     local ai_exit_code=0
     local ai_cmd_full=""
     local provider_lower
     provider_lower=$(echo "$AI_PROVIDER" | tr '[:upper:]' '[:lower:]')
 
-    # Build command based on provider
+    # Write prompt to temp file to avoid shell escaping issues with special characters
+    # This is critical because prompts may contain Swift code with $(), //, etc.
+    # Using printf '%s' to avoid echo interpreting escape sequences
+    local prompt_file="${LOGS_DIR}/prompt_attempt_${CURRENT_ATTEMPT}.txt"
+    printf '%s' "$prompt" > "$prompt_file"
+    
+    # Build command based on provider (all use temp file/stdin for safety)
     case "$provider_lower" in
         cursor)
-            # Build command based on whether this is a follow-up with session resume
+            # cursor-agent reads from stdin when piped
             if [ "$is_followup" = "true" ] && [ -n "$CURSOR_CHAT_ID" ] && [ "$AI_CMD" = "cursor-agent" ]; then
                 # Resume existing session
                 log_verbose "Resuming Cursor chat session: $CURSOR_CHAT_ID"
-                ai_cmd_full="$AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text \"$prompt\""
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text"
             else
                 # New session (first attempt)
-                if [ "$AI_CMD" = "cursor-agent" ]; then
-                    ai_cmd_full="$AI_CMD --force --print --output-format text \"$prompt\""
-                else
-                    # cursor agent format (space-separated)
-                    ai_cmd_full="$AI_CMD --force --print --output-format text \"$prompt\""
-                fi
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --force --print --output-format text"
                 log_verbose "Starting new Cursor chat session"
             fi
             ;;
         
         claude)
-            # Claude CLI format with auto-approval flag
-            ai_cmd_full="$AI_CMD --dangerously-skip-permissions \"$prompt\""
+            # Claude CLI - pipe from file to avoid escaping issues
+            ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --dangerously-skip-permissions -p -"
             log_verbose "Running Claude CLI (with --dangerously-skip-permissions)"
             ;;
         
         codex|openai)
-            # OpenAI/Codex format with full-auto flag
-            ai_cmd_full="$AI_CMD complete --full-auto \"$prompt\""
+            # OpenAI/Codex format with full-auto flag - pipe from file
+            ai_cmd_full="cat \"$prompt_file\" | $AI_CMD complete --full-auto -"
             log_verbose "Running OpenAI/Codex CLI (with --full-auto)"
             ;;
         
         gemini|google)
-            # Gemini format with yolo flag
+            # Gemini format with yolo flag - pipe from file
             if [ "$AI_CMD" = "gemini" ]; then
-                ai_cmd_full="$AI_CMD generate --yolo \"$prompt\""
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD generate --yolo"
             else
-                ai_cmd_full="$AI_CMD generate-text --yolo --prompt=\"$prompt\""
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD generate-text --yolo"
             fi
             log_verbose "Running Gemini CLI (with --yolo)"
             ;;
         
         aider)
-            # Aider format - writes prompt to temp file and uses --yes flag
-            local prompt_file="${LOGS_DIR}/aider_prompt_${CURRENT_ATTEMPT}.txt"
-            echo "$prompt" > "$prompt_file"
+            # Aider format - uses --message-file directly (already safe)
             ai_cmd_full="$AI_CMD --yes --message-file \"$prompt_file\""
             log_verbose "Running Aider CLI"
             ;;

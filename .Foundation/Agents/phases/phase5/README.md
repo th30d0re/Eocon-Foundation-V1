@@ -7,7 +7,7 @@ Phase 5 handles AI-powered code generation and build verification with automatic
 | Script | Purpose |
 |--------|---------|
 | `BuildAgent.sh` | Main orchestrator - generates code via AI CLI and verifies builds |
-| `BuildLint.sh` | Build verification - runs lints and Xcode builds |
+| `BuildLint.sh` | Build verification - runs SwiftLint and Xcode builds |
 
 ---
 
@@ -19,25 +19,25 @@ Make BuildAgent and BuildLint available as global commands:
 
 ```bash
 # From the repository root
-sudo ln -s $(pwd)/.Foundation/Agents/phases/phase5/BuildAgent.sh /usr/local/bin/BuildAgent
-sudo ln -s $(pwd)/.Foundation/Agents/phases/phase5/BuildLint.sh /usr/local/bin/BuildLint
+sudo ln -s $(pwd)/.Foundation/Agents/phases/phase5/BuildAgent.sh /usr/local/bin/BuildAgent.sh
+sudo ln -s $(pwd)/.Foundation/Agents/phases/phase5/BuildLint.sh /usr/local/bin/BuildLint.sh
 
 # Now use from any Swift project!
 cd /path/to/your/project
-BuildAgent --plan plan.md
+BuildAgent.sh --plan plan.md
 ```
 
 ### Basic Usage
 
 ```bash
-# Minimal - auto-detects everything
-BuildAgent --plan plan.md
+# Minimal - auto-detects everything (Xcode project, scheme, Swift docs)
+BuildAgent.sh --plan plan.md
 
 # Use Claude instead of Cursor
-BuildAgent --plan plan.md --ai-provider claude
+BuildAgent.sh --plan plan.md --ai-provider claude
 
-# Full automation mode
-BuildAgent --plan plan.md --ai-provider claude --yolo
+# Full automation mode (10 retries, verbose, streaming)
+BuildAgent.sh --plan plan.md --ai-provider claude --yolo
 ```
 
 ---
@@ -49,12 +49,10 @@ The main build agent that orchestrates AI-powered code generation and verificati
 ### ✨ Features
 
 - **🤖 Multi-AI Provider Support**: Choose from Cursor, Claude, Codex, Gemini, or Aider
-- **🔧 Auto-Installation**: Missing providers are installed automatically using Cursor AI
-- **🔍 Smart Auto-Detection**: 
-  - Swift documentation (searches working directory first)
-  - Xcode projects/workspaces (always detects, even with --scheme)
-  - Build folders
-  - Git repositories (auto-initializes in YOLO mode)
+- **🔧 Auto-Installation**: Missing AI providers are installed automatically using Cursor AI
+- **🔍 Deep Auto-Detection**: Finds Xcode projects/workspaces and swiftDocs up to 5 levels deep
+- **🎯 Smart Exclusions**: Automatically excludes `.build`, `Pods`, `Carthage`, `checkouts`, `DerivedData`
+- **📚 Shortest Path Priority**: Finds your main project, not dependency projects
 - **🔐 Auth Error Detection**: Detects authentication errors and provides setup instructions
 - **⚡ Auto-Approval Flags**: Each provider gets automatic flags for unattended operation
 - **🌍 PATH Support**: Install globally and use from any project directory
@@ -77,15 +75,15 @@ BuildAgent supports multiple AI providers:
 
 ```bash
 # Use Claude (auto-installs if not present)
-BuildAgent --plan plan.md --ai-provider claude
+BuildAgent.sh --plan plan.md --ai-provider claude
 
 # Use Gemini with specific model
-BuildAgent --plan plan.md --ai-provider gemini --ai-model gemini-2.0-pro
+BuildAgent.sh --plan plan.md --ai-provider gemini --ai-model gemini-2.0-pro
 ```
 
 For full documentation, run:
 ```bash
-BuildAgent --help
+BuildAgent.sh --help
 ```
 
 ### 🔍 Smart Auto-Detection
@@ -93,14 +91,16 @@ BuildAgent --help
 BuildAgent automatically detects your project structure:
 
 **Swift Documentation:**
-- Searches `swiftDocs/`, `Docs/swiftDocs/`, `Documentation/swiftDocs/` in working directory first
-- Falls back to searching in project root
-- Over 15 search paths checked
+- Searches up to 5 levels deep for `swiftDocs/` directories
+- Excludes dependency folders (`.build`, `Pods`, `Carthage`, `checkouts`, `Ref`)
+- Prioritizes shortest path (main project docs, not dependencies)
+- Searches working directory first, then project root
 
 **Xcode Projects:**
-- Searches for `.xcworkspace` (preferred) or `.xcodeproj`
+- Searches up to 5 levels deep for `.xcworkspace` (preferred) or `.xcodeproj`
+- Excludes dependency folders automatically
+- Prioritizes shortest path (main project, not dependency projects)
 - Always runs detection, even when `--scheme` is provided
-- Searches working directory first, then project root
 - Automatically passes detected paths to BuildLint
 
 **Git Repository:**
@@ -115,6 +115,20 @@ BuildAgent automatically detects your project structure:
 
 ---
 
+## BuildLint.sh
+
+Build verification script that runs SwiftLint and Xcode builds.
+
+### ✨ Features
+
+- **🔧 Auto-Install SwiftLint**: Automatically installs SwiftLint via Homebrew if not present
+- **🍺 Auto-Install Homebrew**: Even installs Homebrew if missing (macOS/Linux)
+- **📝 Smart Linting**: Only lints uncommitted Swift files (faster CI)
+- **🎯 Deep Project Detection**: Finds Xcode projects up to 5 levels deep
+- **🚫 Dependency Exclusion**: Skips `.build`, `Pods`, `Carthage`, `checkouts` folders
+
+---
+
 ## Requirements
 
 ### Required
@@ -126,9 +140,10 @@ BuildAgent automatically detects your project structure:
   - Or Gemini CLI: `npm install -g @google/generative-ai-cli`
   - Or Aider: `pip install aider-chat`
 
-### Optional
-- **SwiftLint**: `brew install swiftlint` (for code linting)
-- **Git**: `brew install git` (auto-initialized in YOLO mode if missing repository)
+### Auto-Installed (if missing)
+- **Homebrew**: Auto-installed on macOS/Linux if needed
+- **SwiftLint**: Auto-installed via Homebrew for code linting
+- **Git**: Auto-initialized in YOLO mode if repository missing
 
 ### Authentication Setup
 
@@ -153,12 +168,15 @@ export GOOGLE_API_KEY=...
 ## Version History
 
 **v2.1** (December 2024)
-- Added automatic Xcode project detection (works even with --scheme provided)
-- Added git repository auto-initialization in YOLO mode
+- Deep auto-detection: Xcode projects and swiftDocs up to 5 levels deep
+- Smart exclusions: Skips dependency folders (`.build`, `Pods`, `Carthage`, etc.)
+- Shortest path priority: Finds main project, not dependency projects
+- Auto-install SwiftLint via Homebrew
+- Auto-install Homebrew if missing (macOS/Linux)
+- Git repository auto-initialization in YOLO mode
+- Fixed `pipefail` compatibility issues
 - Fixed bash 3.2 compatibility (macOS default)
-- Enhanced Swift docs detection to prioritize working directory
-- Improved PATH support with WORK_DIR vs PROJECT_ROOT handling
-- Added comprehensive debug logging
+- Enhanced WORK_DIR vs PROJECT_ROOT handling
 
 **v2.0** (December 2024)
 - Added multi-AI provider support (Cursor, Claude, Codex, Gemini, Aider)
@@ -177,4 +195,4 @@ export GOOGLE_API_KEY=...
 
 ---
 
-For complete documentation, run: `BuildAgent --help` or `BuildLint --help`
+For complete documentation, run: `BuildAgent.sh --help` or `BuildLint.sh --help`
