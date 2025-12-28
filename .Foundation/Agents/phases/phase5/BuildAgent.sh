@@ -103,6 +103,12 @@ SKIP_LINT="${SKIP_LINT:-false}"
 STREAM_OUTPUT="${STREAM_OUTPUT:-false}"
 SKIP_CHAT_ID_CAPTURE="${SKIP_CHAT_ID_CAPTURE:-false}"  # Skip cursor chat ID capture (can be slow/unreliable)
 YOLO_MODE="${YOLO_MODE:-false}"  # Automation mode: enables verbose, skip-chat-id, stream output
+LINT_ONLY_MODE="${LINT_ONLY_MODE:-false}"  # No AI input - just run lint and build
+
+# Letta Memory integration (set by BuildVerify.sh orchestrator)
+LETTA_MEMORY_AGENT="${LETTA_MEMORY_AGENT:-}"  # Memory agent name
+LETTA_MEMORY_SCRIPT="${LETTA_MEMORY_SCRIPT:-}"  # Path to letta_memory.py
+LETTA_MEMORY_CONTEXT=""  # Retrieved memory context (populated at runtime)
 
 # Spinner state
 SPINNER_PID=""
@@ -269,6 +275,101 @@ cleanup_spinner() {
 trap cleanup_spinner EXIT INT TERM
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Letta Memory Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Check if Letta memory is available
+letta_memory_available() {
+    [ -n "$LETTA_MEMORY_AGENT" ] && [ -n "$LETTA_MEMORY_SCRIPT" ] && [ -f "$LETTA_MEMORY_SCRIPT" ]
+}
+
+# Retrieve memory context for build
+retrieve_memory_context() {
+    if ! letta_memory_available; then
+        return 0
+    fi
+
+    log_verbose "Retrieving memory context from Letta..."
+
+    # Search for relevant error patterns and learnings
+    local search_result
+    search_result=$(python3 "$LETTA_MEMORY_SCRIPT" search \
+        --agent "$LETTA_MEMORY_AGENT" \
+        --query "error patterns solutions Swift SwiftUI build" 2>/dev/null || echo "")
+
+    if [ -n "$search_result" ] && [ "$search_result" != "[]" ]; then
+        LETTA_MEMORY_CONTEXT="
+=== LEARNED PATTERNS FROM PREVIOUS SESSIONS ===
+The following patterns and solutions were learned from previous build sessions:
+
+$search_result
+
+Use these patterns to avoid repeating past mistakes.
+=== END LEARNED PATTERNS ===
+"
+        log_info "Retrieved memory context from previous sessions"
+    fi
+}
+
+# Store build result to memory
+store_build_result() {
+    local status="$1"  # success or failure
+    local error_info="${2:-}"
+
+    if ! letta_memory_available; then
+        return 0
+    fi
+
+    log_verbose "Storing build result to memory: $status"
+
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    if [ "$status" = "success" ]; then
+        local data
+        data=$(cat << EOF
+{
+    "status": "success",
+    "session_id": "$SESSION_ID",
+    "scheme": "${DETECTED_SCHEME:-unknown}",
+    "attempts": $CURRENT_ATTEMPT,
+    "ai_provider": "$AI_PROVIDER",
+    "timestamp": "$timestamp"
+}
+EOF
+)
+        python3 "$LETTA_MEMORY_SCRIPT" store \
+            --agent "$LETTA_MEMORY_AGENT" \
+            --block "success_patterns" \
+            --data "$data" >/dev/null 2>&1 || true
+
+        # Also remember the successful approach for implicit learning
+        python3 "$LETTA_MEMORY_SCRIPT" remember \
+            --agent "$LETTA_MEMORY_AGENT" \
+            --content "Build succeeded for scheme ${DETECTED_SCHEME:-unknown} after $CURRENT_ATTEMPT attempts using $AI_PROVIDER" >/dev/null 2>&1 || true
+    else
+        local data
+        data=$(cat << EOF
+{
+    "status": "failure",
+    "session_id": "$SESSION_ID",
+    "scheme": "${DETECTED_SCHEME:-unknown}",
+    "attempts": $CURRENT_ATTEMPT,
+    "max_attempts": $MAX_REPAIR_ATTEMPTS,
+    "ai_provider": "$AI_PROVIDER",
+    "error_summary": "${error_info:0:500}",
+    "timestamp": "$timestamp"
+}
+EOF
+)
+        python3 "$LETTA_MEMORY_SCRIPT" store \
+            --agent "$LETTA_MEMORY_AGENT" \
+            --block "error_patterns" \
+            --data "$data" >/dev/null 2>&1 || true
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Usage
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -288,11 +389,16 @@ DESCRIPTION:
 USAGE:
     $0 [OPTIONS]
 
-INPUT OPTIONS (at least one required):
+INPUT OPTIONS (optional - if none provided, runs lint/build only):
     --plan <file.md>        Path to plan markdown file
     --prompt <file.txt>     Path to prompt text file
     --prompt-string <str>   Prompt string directly (or use stdin)
     --stdin                 Read prompt from stdin
+
+    If no input is provided, BuildAgent runs in auto-detect mode:
+    - First runs lint/build to check for errors
+    - If build passes: exits successfully (no AI needed)
+    - If build fails: uses the errors as AI input and starts repair loop
 
 CONTEXT OPTIONS:
     --context <path>        MD file or directory with MD files (can be repeated)
@@ -307,28 +413,32 @@ CONTEXT OPTIONS:
 
 AI PROVIDER OPTIONS:
     --ai-provider <name>    AI CLI provider to use (default: cursor)
-                            
+
                             Supported providers:
                               cursor  - Cursor AI (default)
                               claude  - Anthropic Claude
                               codex   - OpenAI Codex
                               gemini  - Google Gemini
                               aider   - Aider AI pair programming
-                            
+                              letta   - Letta stateful agents (persistent memory)
+
                             Auto-installation:
                               If a provider is not installed, the script will
-                              attempt to install it using Cursor AI, then retry
-                              your command automatically!
-                            
+                              attempt to install it automatically!
+                              - Letta: via npm (requires Node.js 18+)
+                              - Others: via Cursor AI assistance
+
                             Auto-approval flags (for unattended operation):
                               cursor → --force
                               claude → --dangerously-skip-permissions
                               codex  → --full-auto
                               gemini → --yolo
                               aider  → --yes
-                            
+                              letta  → --yolo
+
     --ai-model <model>      Specific AI model to use (provider-dependent)
                             Example: --ai-model gemini-2.0-pro
+                            For Letta: set LETTA_MODEL env var instead
 
 BUILD OPTIONS:
     --target-id <id>        Device/Simulator UDID (e.g., 00008150-001D5822210A401C)
@@ -345,7 +455,7 @@ EXECUTION OPTIONS:
     --max-attempts <n>      Max repair attempts (default: 3)
     --artifacts-dir <dir>   Artifacts output directory
     --stream                Stream AI CLI output in real-time
-    --yolo                  Automation mode: max-attempts=10, verbose, skip-chat-id, streaming
+    --yolo                  Automation mode: max-attempts=5, verbose, skip-chat-id, streaming
     --skip-chat-id          Skip cursor chat ID capture (faster, but no session resume)
     --dry-run               Show what would be done without executing
     --verbose               Enable verbose output
@@ -367,13 +477,15 @@ OUTPUTS:
 AUTHENTICATION:
     Each AI provider requires authentication. If you see an authentication
     error, the script will provide provider-specific setup instructions.
-    
+
     Quick setup:
       cursor: Already authenticated if Cursor IDE is logged in
       claude: export ANTHROPIC_API_KEY=sk-ant-...
       codex:  export OPENAI_API_KEY=sk-...
       gemini: export GOOGLE_API_KEY=...
       aider:  export OPENAI_API_KEY=... or ANTHROPIC_API_KEY=...
+      letta:  export LETTA_API_KEY=letta-...
+              Optional: export LETTA_BASE_URL=http://localhost:8283 (self-hosted)
 
 ENVIRONMENT VARIABLES:
     PROJECT_ROOT            Override project root directory (default: $PWD)
@@ -387,29 +499,42 @@ EXAMPLES:
     ┌─────────────────────────────────────────────────────────────────────┐
     │ Basic Usage (Auto-Detection)                                        │
     └─────────────────────────────────────────────────────────────────────┘
-    
+
+    # Lint/build only - no AI, just verify the build
+    $0
+    BuildAgent.sh  # When in PATH
+
     # Minimal - auto-detects scheme, Swift docs, uses Cursor
     $0 --plan Plans/plan1/plan1.md
-    
+
     # When script is in PATH, run from your project directory
     cd /path/to/your/project
     BuildAgent.sh --plan plan.md
-    
+
     # Explicitly specify scheme (overrides auto-detection)
     $0 --plan Plans/plan1/plan1.md --scheme MyApp
 
     ┌─────────────────────────────────────────────────────────────────────┐
     │ Different AI Providers                                               │
     └─────────────────────────────────────────────────────────────────────┘
-    
+
     # Use Claude (automatically adds --dangerously-skip-permissions)
     $0 --plan plan.md --ai-provider claude
-    
+
     # Use Gemini with specific model (automatically adds --yolo)
     $0 --plan plan.md --ai-provider gemini --ai-model gemini-2.0-pro
-    
+
     # Use Codex (automatically adds --full-auto)
     $0 --plan plan.md --ai-provider codex
+
+    # Use Letta (stateful agent with persistent memory)
+    $0 --plan plan.md --ai-provider letta
+
+    # Use Letta with specific model
+    LETTA_MODEL=sonnet-4.5 $0 --plan plan.md --ai-provider letta
+
+    # Use Letta with self-hosted instance
+    LETTA_BASE_URL=http://localhost:8283 $0 --plan plan.md --ai-provider letta
 
     ┌─────────────────────────────────────────────────────────────────────┐
     │ Build Configuration                                                  │
@@ -503,11 +628,10 @@ setup_directories() {
 validate_inputs() {
     start_spinner "Validating configuration"
 
-    # Check that at least one input is provided
+    # Check if any input is provided - if not, run in lint-only mode
     if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ]; then
-        spinner_error "Validating configuration"
-        log_error "No input provided. Use --plan, --prompt, --prompt-string, or --stdin"
-        return 1
+        LINT_ONLY_MODE="true"
+        log_info "No AI input provided - running in auto-detect mode (build first, AI repair if needed)"
     fi
 
     # Validate plan file if provided
@@ -558,10 +682,12 @@ validate_inputs() {
         return 1
     fi
 
-    # Detect and configure AI provider
-    if ! detect_ai_provider; then
-        spinner_error "Validating configuration"
-        return 1
+    # Detect and configure AI provider (skip in lint-only mode)
+    if [ "$LINT_ONLY_MODE" = "false" ]; then
+        if ! detect_ai_provider; then
+            spinner_error "Validating configuration"
+            return 1
+        fi
     fi
 
     spinner_success "Validating configuration"
@@ -920,6 +1046,125 @@ Respond with 'INSTALLED' when complete."
     fi
 }
 
+# Auto-install Letta Code CLI
+# Handles nvm environments, Node.js version validation, and PATH issues
+install_letta() {
+    log_info "Letta CLI not found. Attempting auto-installation..."
+
+    # Check for Node.js
+    if ! command -v node >/dev/null 2>&1; then
+        # Try to load nvm if available
+        if [ -f "$HOME/.nvm/nvm.sh" ]; then
+            log_info "Loading nvm..."
+            export NVM_DIR="$HOME/.nvm"
+            # shellcheck disable=SC1091
+            . "$NVM_DIR/nvm.sh"
+        elif [ -f "/usr/local/opt/nvm/nvm.sh" ]; then
+            # Homebrew nvm location
+            export NVM_DIR="/usr/local/opt/nvm"
+            # shellcheck disable=SC1091
+            . "$NVM_DIR/nvm.sh"
+        elif [ -f "/opt/homebrew/opt/nvm/nvm.sh" ]; then
+            # Apple Silicon Homebrew location
+            export NVM_DIR="/opt/homebrew/opt/nvm"
+            # shellcheck disable=SC1091
+            . "$NVM_DIR/nvm.sh"
+        fi
+    fi
+
+    # Verify Node.js is available
+    if ! command -v node >/dev/null 2>&1; then
+        log_error "Node.js not found. Install Node.js 18+ first:"
+        echo "  brew install node" >&2
+        echo "  # or" >&2
+        echo "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash" >&2
+        echo "  nvm install 18" >&2
+        return 1
+    fi
+
+    # Check Node.js version (requires 18+)
+    local node_version
+    node_version=$(node -v | sed 's/v//' | cut -d. -f1)
+    if [ "$node_version" -lt 18 ]; then
+        log_error "Node.js 18+ required. Current version: $(node -v)"
+        echo "  nvm install 18 && nvm use 18" >&2
+        return 1
+    fi
+
+    # Check for npm
+    if ! command -v npm >/dev/null 2>&1; then
+        log_error "npm not found. Install npm or reinstall Node.js"
+        return 1
+    fi
+
+    # Install Letta Code CLI globally
+    log_info "Installing @letta-ai/letta-code via npm..."
+    local install_log="/tmp/letta-install-$$.log"
+    if npm install -g @letta-ai/letta-code 2>&1 | tee "$install_log"; then
+        # Verify installation
+        if command -v letta >/dev/null 2>&1; then
+            log_success "Letta Code CLI installed successfully: $(letta --version 2>/dev/null || echo 'installed')"
+            rm -f "$install_log"
+            return 0
+        else
+            # Check if npm global bin is in PATH
+            local npm_bin
+            npm_bin=$(npm bin -g 2>/dev/null)
+            if [ -n "$npm_bin" ] && [ -x "$npm_bin/letta" ]; then
+                log_warning "Letta installed but not in PATH. Adding temporarily..."
+                export PATH="$npm_bin:$PATH"
+                if command -v letta >/dev/null 2>&1; then
+                    log_success "Letta Code CLI available: $(letta --version 2>/dev/null || echo 'installed')"
+                    rm -f "$install_log"
+                    return 0
+                fi
+            fi
+            log_error "Letta installed but 'letta' command not found in PATH"
+            echo "  Add npm global bin to PATH: export PATH=\"\$(npm bin -g):\$PATH\"" >&2
+            rm -f "$install_log"
+            return 1
+        fi
+    else
+        log_error "Failed to install Letta. Check $install_log for details"
+        return 1
+    fi
+}
+
+# Initialize or resume directory-specific Letta agent
+# Each project directory gets its own dedicated agent with persistent memory
+init_letta_directory_agent() {
+    local project_dir="${1:-$WORK_DIR}"
+    local project_name
+    project_name=$(basename "$project_dir")
+    local letta_config="$project_dir/.letta/settings.local.json"
+
+    # Check if agent already exists for this directory
+    if [ -f "$letta_config" ]; then
+        # Letta auto-resumes the pinned agent when run from this directory
+        log_verbose "Resuming Letta agent for: $project_name"
+        return 0
+    fi
+
+    # First run: Create and initialize new agent
+    log_info "Creating new Letta agent for: $project_name"
+
+    # Create agent with project-specific name and initialize memory
+    # Use --new to create a fresh agent, run /init to learn the codebase
+    if (cd "$project_dir" && echo "You are the build agent for '$project_name'. Please run /init to learn this codebase structure." | letta --new --yolo -p 2>/dev/null); then
+        # Pin agent locally to this directory
+        if (cd "$project_dir" && echo "/pin -l ${project_name}-builder" | letta 2>/dev/null); then
+            log_success "Letta agent initialized and pinned locally for: $project_name"
+            return 0
+        else
+            log_warning "Agent created but local pinning failed - agent will still work"
+            return 0
+        fi
+    else
+        log_warning "Could not initialize Letta agent - will use default agent"
+        return 1
+    fi
+}
+
 # Detect and configure AI CLI provider
 detect_ai_provider() {
     local provider
@@ -1017,10 +1262,26 @@ detect_ai_provider() {
                 return 1
             fi
             ;;
-        
+
+        letta)
+            if command -v letta >/dev/null 2>&1; then
+                AI_CMD="letta"
+                log_info "Using Letta Code CLI: $(letta --version 2>/dev/null || echo 'installed')"
+                log_info "Letta provides stateful agents with persistent memory"
+                return 0
+            else
+                # Attempt auto-installation via npm
+                if install_letta; then
+                    AI_CMD="letta"
+                    return 0
+                fi
+                return 1
+            fi
+            ;;
+
         *)
             log_error "Unknown AI provider: $provider"
-            log_info "Supported providers: cursor, claude, codex, gemini, aider"
+            log_info "Supported providers: cursor, claude, codex, gemini, aider, letta"
             return 1
             ;;
     esac
@@ -1093,6 +1354,17 @@ check_auth_error() {
                     echo "  1. Get your API key from your AI provider" >&2
                     echo "  2. Set environment variable (e.g., OPENAI_API_KEY, ANTHROPIC_API_KEY)" >&2
                     echo "  3. Or run: aider --help for setup instructions" >&2
+                    ;;
+                letta)
+                    log_info "To authenticate Letta Code:"
+                    echo "  1. Get your API key from: https://app.letta.com/api-keys" >&2
+                    echo "  2. Set environment variable: export LETTA_API_KEY=your_key" >&2
+                    echo "  3. Or run: letta (first run prompts for authentication)" >&2
+                    if [ -n "${LETTA_BASE_URL:-}" ]; then
+                        echo "" >&2
+                        echo "  Self-hosted instance detected: $LETTA_BASE_URL" >&2
+                        echo "  Ensure your API key is valid for this server." >&2
+                    fi
                     ;;
             esac
             
@@ -1245,6 +1517,13 @@ $context
 "
     fi
 
+    # Inject memory context if available (learned patterns from previous sessions)
+    if [ -n "$LETTA_MEMORY_CONTEXT" ]; then
+        prompt+="
+$LETTA_MEMORY_CONTEXT
+"
+    fi
+
     prompt+="
 
 Please implement the requirements above. Write the code directly - do not explain, just write the implementation."
@@ -1271,6 +1550,13 @@ $original_task
 === REFERENCE CONTEXT ===
 $context
 === END CONTEXT ===
+"
+    fi
+
+    # Inject memory context if available (learned patterns from previous sessions)
+    if [ -n "$LETTA_MEMORY_CONTEXT" ]; then
+        prompt+="
+$LETTA_MEMORY_CONTEXT
 "
     fi
 
@@ -1410,7 +1696,41 @@ run_ai_cli() {
             ai_cmd_full="$AI_CMD --yes --message-file \"$prompt_file\""
             log_verbose "Running Aider CLI"
             ;;
-        
+
+        letta)
+            # Letta Code - headless mode with -p flag
+            # Uses stateful agents with persistent memory per directory
+            local letta_flags=""
+
+            # Initialize directory-specific agent (first run creates and pins agent)
+            init_letta_directory_agent "$WORK_DIR" || true
+
+            # Auto-approval in YOLO mode
+            if [ "${YOLO_MODE:-false}" = "true" ]; then
+                letta_flags="--yolo"
+            fi
+
+            # Streaming output format for long operations
+            if [ "${STREAM_OUTPUT:-false}" = "true" ]; then
+                letta_flags="$letta_flags --output-format stream-json"
+            fi
+
+            # Model selection if specified (via LETTA_MODEL env var)
+            if [ -n "${LETTA_MODEL:-}" ]; then
+                letta_flags="$letta_flags --model \"$LETTA_MODEL\""
+            fi
+
+            # Self-hosted instance support
+            if [ -n "${LETTA_BASE_URL:-}" ]; then
+                export LETTA_BASE_URL
+            fi
+
+            # Build command - run from WORK_DIR so Letta uses the directory-pinned agent
+            # Pipe prompt file to letta with -p flag for headless execution
+            ai_cmd_full="cat \"$prompt_file\" | $AI_CMD $letta_flags -p"
+            log_verbose "Running Letta Code CLI with directory-specific agent"
+            ;;
+
         *)
             log_error "Unknown AI provider: $AI_PROVIDER"
             return 1
@@ -1674,6 +1994,9 @@ Artifacts:
 EOF
 
     log_success "Status written to: $status_file"
+
+    # Store success to Letta memory
+    store_build_result "success"
 }
 
 write_human_intervention() {
@@ -1732,6 +2055,138 @@ EOF
     if [ -d "${PROJECT_ROOT}/.foundation/errors" ]; then
         cp "$status_file" "${PROJECT_ROOT}/.foundation/errors/human_intervention_$(date +%Y%m%d_%H%M%S).md"
     fi
+
+    # Store failure to Letta memory
+    store_build_result "failure" "$all_errors"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Error-Driven Repair Loop (when no plan provided but build fails)
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_repair_loop_with_errors() {
+    local initial_errors="$1"
+    local context
+    local error_feedback="$initial_errors"
+    local is_followup="false"
+
+    context=$(gather_context)
+
+    # Retrieve memory context from Letta if available
+    retrieve_memory_context
+
+    log_info "Context length: ${#context} chars"
+    log_info "Initial errors length: ${#initial_errors} chars"
+    [ -n "$LETTA_MEMORY_CONTEXT" ] && log_info "Memory context: available"
+
+    while [ $CURRENT_ATTEMPT -lt $MAX_REPAIR_ATTEMPTS ]; do
+        CURRENT_ATTEMPT=$((CURRENT_ATTEMPT + 1))
+
+        echo "" >&2
+        log_section "────────────────────────────────────────"
+        log_attempt "Starting repair cycle"
+        log_section "────────────────────────────────────────"
+
+        # Create AI prompt with build errors as input
+        local prompt_content
+        if [ "$is_followup" = "true" ]; then
+            prompt_content="Previous fix attempt failed. Here are the remaining build errors:
+
+$error_feedback
+
+Please analyze and fix these errors."
+        else
+            prompt_content="The build failed with the following errors. Please fix them:
+
+$error_feedback
+
+Project context:
+$context"
+        fi
+
+        # Generate code with AI
+        if ! run_ai_cli "$prompt_content"; then
+            update_session_context "$CURRENT_ATTEMPT" "ai_error" "AI CLI failed"
+            log_error "AI CLI call failed"
+            # Note: run_ai_cli handles auth error detection internally
+            # Continue to next attempt
+            is_followup="true"
+            continue
+        fi
+
+        update_session_context "$CURRENT_ATTEMPT" "ai_success" "AI code generated"
+
+        # Verify build
+        if run_build_lint; then
+            # Success!
+            update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
+            write_success_status
+            return 0
+        fi
+
+        # Build still failing - get new errors
+        error_feedback=$(get_error_feedback)
+        update_session_context "$CURRENT_ATTEMPT" "build_failed" "$error_feedback"
+
+        log_warning "Build still failing, will retry..."
+        is_followup="true"
+    done
+
+    # Exhausted all attempts
+    log_error "Maximum repair attempts ($MAX_REPAIR_ATTEMPTS) reached"
+    write_human_intervention
+    return 10
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-Detect Mode (no plan provided - lint/build first, AI repair if needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_lint_only() {
+    log_section "Running initial lint/build check (no plan provided)"
+    echo "" >&2
+
+    CURRENT_ATTEMPT=0
+
+    # Initialize session context file
+    {
+        echo "# Build Session: $SESSION_ID"
+        echo "Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        echo "Mode: Auto-detect (lint/build first, AI repair if needed)"
+        echo "Max attempts: $MAX_REPAIR_ATTEMPTS"
+        echo "AI Provider: $AI_PROVIDER"
+        echo ""
+    } > "$SESSION_FILE"
+
+    # Run initial build verification
+    if run_build_lint; then
+        # Success! No errors to fix
+        update_session_context "0" "success" "Build passed - no errors to fix"
+        write_success_status
+        log_success "Build passed! No errors detected."
+        return 0
+    fi
+
+    # Build failed - use errors as input for AI repair loop
+    local error_feedback
+    error_feedback=$(get_error_feedback)
+    update_session_context "0" "build_failed" "$error_feedback"
+
+    log_warning "Build errors detected - starting AI repair loop"
+    log_info "Using build errors as AI input"
+    echo "" >&2
+
+    # Detect AI provider before repair loop (was skipped during validation in lint-only mode)
+    if ! detect_ai_provider; then
+        log_error "Cannot start repair loop: AI provider '$AI_PROVIDER' not available"
+        write_human_intervention
+        return 11
+    fi
+
+    # Transition to repair loop with errors as input
+    # Set the error_feedback as initial context for the loop
+    run_repair_loop_with_errors "$error_feedback"
+    return $?
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1739,6 +2194,12 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────────
 
 run_build_loop() {
+    # Handle lint-only mode
+    if [ "$LINT_ONLY_MODE" = "true" ]; then
+        run_lint_only
+        return $?
+    fi
+
     local input_content
     local context
     local error_feedback=""
@@ -1747,8 +2208,12 @@ run_build_loop() {
     input_content=$(get_input_content)
     context=$(gather_context)
 
+    # Retrieve memory context from Letta if available
+    retrieve_memory_context
+
     log_info "Input length: ${#input_content} chars"
     log_info "Context length: ${#context} chars"
+    [ -n "$LETTA_MEMORY_CONTEXT" ] && log_info "Memory context: available"
     log_info "Session ID: $SESSION_ID"
 
     # Initialize session context file
@@ -1917,9 +2382,9 @@ main() {
                 VERBOSE="true"
                 SKIP_CHAT_ID_CAPTURE="true"
                 STREAM_OUTPUT="true"
-                # Increase max attempts to 10 for YOLO mode (unless already set)
+                # Increase max attempts to 5 for YOLO mode (unless already set)
                 if [ "$MAX_REPAIR_ATTEMPTS" = "3" ]; then
-                    MAX_REPAIR_ATTEMPTS="10"
+                    MAX_REPAIR_ATTEMPTS="5"
                 fi
                 log_info "YOLO mode enabled: verbose + skip-chat-id + streaming + max-attempts=${MAX_REPAIR_ATTEMPTS}"
                 shift 1
@@ -1961,10 +2426,16 @@ main() {
 
     log_info "Working Directory: $WORK_DIR"
     log_info "Project Root: $PROJECT_ROOT"
-    log_info "Max Repair Attempts: $MAX_REPAIR_ATTEMPTS"
-    log_info "AI Provider: $AI_PROVIDER"
-    if [ -n "$AI_MODEL" ]; then
-        log_info "AI Model: $AI_MODEL"
+    if [ "$LINT_ONLY_MODE" = "true" ]; then
+        log_info "Mode: Auto-detect (build first, AI repair if errors found)"
+        log_info "AI Provider: $AI_PROVIDER (used if build fails)"
+        log_info "Max Repair Attempts: $MAX_REPAIR_ATTEMPTS"
+    else
+        log_info "Max Repair Attempts: $MAX_REPAIR_ATTEMPTS"
+        log_info "AI Provider: $AI_PROVIDER"
+        if [ -n "$AI_MODEL" ]; then
+            log_info "AI Model: $AI_MODEL"
+        fi
     fi
     log_info "Artifacts: $ARTIFACTS_DIR"
     if [ "$YOLO_MODE" = "true" ]; then

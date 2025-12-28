@@ -30,13 +30,16 @@ BuildAgent.sh --plan plan.md
 ### Basic Usage
 
 ```bash
-# Minimal - auto-detects everything (Xcode project, scheme, Swift docs)
+# Auto-detect mode: runs build first, uses errors as AI input if any
+BuildAgent.sh
+
+# With a plan file - auto-detects everything (Xcode project, scheme, Swift docs)
 BuildAgent.sh --plan plan.md
 
 # Use Claude instead of Cursor
 BuildAgent.sh --plan plan.md --ai-provider claude
 
-# Full automation mode (10 retries, verbose, streaming)
+# Full automation mode (5 retries, verbose, streaming)
 BuildAgent.sh --plan plan.md --ai-provider claude --yolo
 ```
 
@@ -48,10 +51,11 @@ The main build agent that orchestrates AI-powered code generation and verificati
 
 ### ✨ Features
 
-- **🤖 Multi-AI Provider Support**: Choose from Cursor, Claude, Codex, Gemini, or Aider
+- **🤖 Multi-AI Provider Support**: Choose from Cursor, Claude, Codex, Gemini, Aider, or Letta
+- **🎯 Auto-Detect Mode**: Run without input - builds first, uses errors as AI input if any
 - **🔧 Auto-Installation**: Missing AI providers are installed automatically using Cursor AI
 - **🔍 Deep Auto-Detection**: Finds Xcode projects/workspaces and swiftDocs up to 5 levels deep
-- **🎯 Smart Exclusions**: Automatically excludes `.build`, `Pods`, `Carthage`, `checkouts`, `DerivedData`
+- **🚫 Smart Exclusions**: Automatically excludes `.build`, `Pods`, `Carthage`, `checkouts`, `DerivedData`
 - **📚 Shortest Path Priority**: Finds your main project, not dependency projects
 - **🔐 Auth Error Detection**: Detects authentication errors and provides setup instructions
 - **⚡ Auto-Approval Flags**: Each provider gets automatic flags for unattended operation
@@ -63,15 +67,18 @@ The main build agent that orchestrates AI-powered code generation and verificati
 
 BuildAgent supports multiple AI providers:
 
-| Provider | Command | Auto-Approval Flag | Installation |
-|----------|---------|-------------------|--------------|
-| **Cursor** (default) | `cursor-agent` | `--force` | Manual |
-| **Claude** | `claude` | `--dangerously-skip-permissions` | Auto |
-| **Codex/OpenAI** | `openai` | `--full-auto` | Auto |
-| **Gemini** | `gemini` | `--yolo` | Auto |
-| **Aider** | `aider` | `--yes` | Auto |
+| Provider | Command | Auto-Approval Flag | Installation | Notes |
+|----------|---------|-------------------|--------------|-------|
+| **Cursor** (default) | `cursor-agent` | `--force` | Manual | Requires Cursor IDE login |
+| **Claude** | `claude` | `--dangerously-skip-permissions` | Auto | Via npm |
+| **Codex/OpenAI** | `openai` | `--full-auto` | Auto | Via pip |
+| **Gemini** | `gemini` | `--yolo` | Auto | Via npm |
+| **Aider** | `aider` | `--yes` | Auto | Via pip |
+| **Letta** | `letta` | `--yolo` | Auto | Via npm, stateful agents |
 
-**Auto-Installation**: If a provider is not installed, BuildAgent will use Cursor AI to install it automatically!
+**Auto-Installation**: Missing providers are installed automatically!
+- **Letta**: Installed via `npm install -g @letta-ai/letta-code` (requires Node.js 18+)
+- **Others**: Installed using Cursor AI assistance
 
 ```bash
 # Use Claude (auto-installs if not present)
@@ -79,7 +86,24 @@ BuildAgent.sh --plan plan.md --ai-provider claude
 
 # Use Gemini with specific model
 BuildAgent.sh --plan plan.md --ai-provider gemini --ai-model gemini-2.0-pro
+
+# Use Letta (stateful agent with persistent memory per directory)
+BuildAgent.sh --plan plan.md --ai-provider letta
+
+# Use Letta with specific model
+LETTA_MODEL=sonnet-4.5 BuildAgent.sh --plan plan.md --ai-provider letta
 ```
+
+#### Letta: Stateful Agents
+
+Letta is unique among providers - it creates **directory-specific agents** with persistent memory:
+
+- **First Run**: Creates and pins an agent specific to your project directory
+- **Subsequent Runs**: Resumes the same agent, which remembers:
+  - Your codebase structure (via `/init`)
+  - Previous build errors and fixes
+  - Learned preferences and patterns
+- **Benefits**: Agent improves over time, learns from failures, and retains context across build attempts
 
 For full documentation, run:
 ```bash
@@ -134,11 +158,12 @@ Build verification script that runs SwiftLint and Xcode builds.
 ### Required
 - **Xcode**: Command line tools installed (`xcode-select --install`)
 - **At least one AI provider**:
-  - Cursor CLI (install from [cursor.sh](https://cursor.sh)) - Required for auto-installation
+  - Cursor CLI (install from [cursor.sh](https://cursor.sh)) - Required for auto-installation of others
   - Or Claude CLI: `npm install -g @anthropic-ai/claude-cli`
   - Or OpenAI CLI: `pip install openai-cli`
   - Or Gemini CLI: `npm install -g @google/generative-ai-cli`
   - Or Aider: `pip install aider-chat`
+  - Or Letta: `npm install -g @letta-ai/letta-code` (requires Node.js 18+)
 
 ### Auto-Installed (if missing)
 - **Homebrew**: Auto-installed on macOS/Linux if needed
@@ -159,6 +184,11 @@ export OPENAI_API_KEY=sk-...
 # Gemini
 export GOOGLE_API_KEY=...
 
+# Letta
+export LETTA_API_KEY=letta-...
+# Optional: Self-hosted instance
+export LETTA_BASE_URL=http://localhost:8283
+
 # Cursor - Already authenticated if Cursor IDE is logged in
 # Aider - Uses OPENAI_API_KEY or ANTHROPIC_API_KEY
 ```
@@ -166,6 +196,13 @@ export GOOGLE_API_KEY=...
 ---
 
 ## Version History
+
+**v2.2** (December 2024)
+- Added Letta AI provider support (stateful agents with persistent memory)
+- Directory-based agent strategy: each project gets its own agent
+- Auto-installation via npm for Letta (requires Node.js 18+)
+- nvm environment detection for Letta installation
+- Agent memory persistence across build attempts
 
 **v2.1** (December 2024)
 - Deep auto-detection: Xcode projects and swiftDocs up to 5 levels deep

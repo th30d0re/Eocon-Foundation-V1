@@ -1,0 +1,106 @@
+import XCTest
+
+/// UI Tests for {{FEATURE_NAME}}
+class {{FEATURE_NAME}}UITests: XCTestCase {
+
+    // MARK: - Properties
+
+    var app: XCUIApplication!
+
+    // MARK: - Setup & Teardown
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+
+        // Stop immediately when a failure occurs
+        continueAfterFailure = false
+
+        // Initialize and launch the app
+        app = XCUIApplication()
+        app.launchArguments = ["--uitesting"]
+        app.launch()
+    }
+
+    override func tearDownWithError() throws {
+        app = nil
+        try super.tearDownWithError()
+    }
+
+    // MARK: - Helper Methods
+
+    /// Wait for an element to exist
+    private func waitForElement(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        return element.waitForExistence(timeout: timeout)
+    }
+
+    /// Tap element with wait
+    private func tapElement(_ element: XCUIElement, timeout: TimeInterval = 5) {
+        XCTAssertTrue(waitForElement(element, timeout: timeout), "Element not found: \(element)")
+        element.tap()
+    }
+
+    /// Enter text in a field
+    private func enterText(_ text: String, in element: XCUIElement, timeout: TimeInterval = 5) {
+        XCTAssertTrue(waitForElement(element, timeout: timeout), "Text field not found: \(element)")
+        element.tap()
+        element.typeText(text)
+    }
+
+    /// Verify element exists
+    private func verifyExists(_ element: XCUIElement, timeout: TimeInterval = 5) {
+        XCTAssertTrue(waitForElement(element, timeout: timeout), "Expected element not found: \(element)")
+    }
+
+    // MARK: - Tests
+
+    /// Test {{FLOW_NAME}} flow
+    /// Expected: {{EXPECTED_BEHAVIOR}}
+    func testUI_{{FLOW_NAME}}_{{EXPECTED_BEHAVIOR}}() throws {
+        // Arrange - Navigate to starting point if needed
+
+        // Act - Execute flow steps
+        // {{STEP_1}}
+        // {{STEP_2}}
+        // {{STEP_3}}
+
+        // Assert - Verify expected outcome
+    }
+
+    // MARK: - Happy Path Tests
+
+    func testUI_{{FEATURE_NAME}}_happyPath_succeeds() throws {
+        // Test the main successful user journey
+    }
+
+    // MARK: - Sad Path Tests
+
+    func testUI_{{FEATURE_NAME}}_withInvalidInput_showsError() throws {
+        // Test error handling for invalid input
+    }
+
+    func testUI_{{FEATURE_NAME}}_withEmptyInput_showsValidation() throws {
+        // Test validation messages for empty input
+    }
+
+    // MARK: - Edge Cases
+
+    func testUI_{{FEATURE_NAME}}_networkError_handlesGracefully() throws {
+        // Test network error handling
+    }
+
+    // MARK: - Accessibility
+
+    func testAccessibility_{{FEATURE_NAME}}_elementsHaveLabels() throws {
+        // Verify accessibility labels are present
+        let elements = app.descendants(matching: .any).matching(identifier: "{{ELEMENT_ID}}")
+        XCTAssertGreaterThan(elements.count, 0, "No accessible elements found")
+    }
+
+    // MARK: - Performance
+
+    func testPerformance_{{FEATURE_NAME}}_loadTime() throws {
+        measure(metrics: [XCTApplicationLaunchMetric()]) {
+            app.launch()
+        }
+    }
+}

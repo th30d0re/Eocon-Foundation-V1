@@ -1,0 +1,79 @@
+import XCTest
+@testable import {{MODULE_NAME}}
+
+/// Unit tests for {{CLASS_NAME}}
+class {{CLASS_NAME}}Tests: XCTestCase {
+
+    // MARK: - Properties
+
+    var sut: {{CLASS_NAME}}!
+
+    // MARK: - Setup & Teardown
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        // Initialize system under test
+        sut = {{CLASS_NAME}}()
+    }
+
+    override func tearDownWithError() throws {
+        // Clean up
+        sut = nil
+        try super.tearDownWithError()
+    }
+
+    // MARK: - Tests
+
+    /// Test {{FUNCTION_NAME}} with {{CONDITION}}
+    /// Expected: {{EXPECTED_RESULT}}
+    func test_{{FUNCTION_NAME}}_{{CONDITION}}_{{EXPECTED_RESULT}}() throws {
+        // Arrange
+        // TODO: Set up test data and preconditions
+
+        // Act
+        // TODO: Execute the function under test
+        // let result = sut.{{FUNCTION_NAME}}()
+
+        // Assert
+        // TODO: Verify the expected outcome
+        // XCTAssertEqual(result, expected)
+    }
+
+    // MARK: - Edge Cases
+
+    func test_{{FUNCTION_NAME}}_withNilInput_shouldHandleGracefully() throws {
+        // Arrange
+
+        // Act
+
+        // Assert
+    }
+
+    func test_{{FUNCTION_NAME}}_withEmptyInput_shouldReturnDefault() throws {
+        // Arrange
+
+        // Act
+
+        // Assert
+    }
+
+    // MARK: - Error Handling
+
+    func test_{{FUNCTION_NAME}}_withInvalidInput_shouldThrowError() throws {
+        // Arrange
+
+        // Act & Assert
+        XCTAssertThrowsError(try sut.{{FUNCTION_NAME}}()) { error in
+            // Verify error type
+        }
+    }
+
+    // MARK: - Performance
+
+    func testPerformance_{{FUNCTION_NAME}}() throws {
+        measure {
+            // Measure performance of the function
+            // _ = sut.{{FUNCTION_NAME}}()
+        }
+    }
+}
