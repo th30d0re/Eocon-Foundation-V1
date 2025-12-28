@@ -51,6 +51,18 @@ if [ -f "$ERRORS_LIB" ]; then
     source "$ERRORS_LIB"
 fi
 
+# Build queue coordination library (prevents concurrent write/build conflicts)
+BUILD_QUEUE_LIB="${PROJECT_ROOT}/.foundation/lib/BuildQueue.sh"
+BUILD_QUEUE_ENABLED="${BUILD_QUEUE_ENABLED:-true}"  # Set to false to disable coordination
+
+if [ -f "$BUILD_QUEUE_LIB" ] && [ "$BUILD_QUEUE_ENABLED" = "true" ]; then
+    # shellcheck disable=SC1090
+    source "$BUILD_QUEUE_LIB"
+    BUILD_QUEUE_AVAILABLE=true
+else
+    BUILD_QUEUE_AVAILABLE=false
+fi
+
 # Colors (fallback if helpers not loaded)
 RED="${RED:-\033[0;31m}"
 GREEN="${GREEN:-\033[0;32m}"
@@ -145,6 +157,120 @@ log_verbose() {
     if [ "$VERBOSE" = "true" ]; then
         echo -e "${CYAN}[VERBOSE]${NC} $1" >&2
     fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build Queue Coordination Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Initialize build queue for this session
+init_build_queue() {
+    if [ "$BUILD_QUEUE_AVAILABLE" != "true" ]; then
+        log_verbose "Build queue coordination disabled or unavailable"
+        return 0
+    fi
+
+    # Initialize queue for this project
+    bq_init "$WORK_DIR" "buildagent_${SESSION_ID}"
+    log_info "Build queue initialized (coordination enabled)"
+
+    # Start heartbeat to keep locks alive during long operations
+    bq_start_heartbeat
+}
+
+# Acquire write lock (for code generation) - blocks until available
+acquire_write_access() {
+    if [ "$BUILD_QUEUE_AVAILABLE" != "true" ]; then
+        return 0
+    fi
+
+    log_verbose "Acquiring write lock for code generation..."
+
+    if ! bq_acquire_write_lock; then
+        log_warning "Write lock not immediately available, waiting..."
+        echo "" >&2
+        log_info "Another BuildAgent instance is active. Waiting for access..."
+        log_info "Queue status: $(bq_get_state)"
+
+        # Start spinner while waiting
+        start_spinner "Waiting for write access"
+
+        if ! bq_wait_for_write; then
+            stop_spinner
+            log_error "Timeout waiting for write lock"
+            return 1
+        fi
+
+        stop_spinner
+        log_success "Write lock acquired after waiting"
+    else
+        log_verbose "Write lock acquired immediately"
+    fi
+
+    return 0
+}
+
+# Release write lock
+release_write_access() {
+    if [ "$BUILD_QUEUE_AVAILABLE" != "true" ]; then
+        return 0
+    fi
+
+    bq_release_write_lock
+    log_verbose "Write lock released"
+}
+
+# Acquire build lock (for compilation) - blocks until available
+acquire_build_access() {
+    if [ "$BUILD_QUEUE_AVAILABLE" != "true" ]; then
+        return 0
+    fi
+
+    log_verbose "Acquiring build lock for compilation..."
+
+    if ! bq_acquire_build_lock; then
+        log_warning "Build lock not immediately available, waiting..."
+        log_info "Another agent is modifying code. Waiting for stability..."
+
+        start_spinner "Waiting for code changes to complete"
+
+        if ! bq_wait_for_build; then
+            stop_spinner
+            log_error "Timeout waiting for build lock"
+            return 1
+        fi
+
+        stop_spinner
+        log_success "Build lock acquired after waiting"
+    else
+        log_verbose "Build lock acquired immediately"
+    fi
+
+    return 0
+}
+
+# Release build lock
+release_build_access() {
+    if [ "$BUILD_QUEUE_AVAILABLE" != "true" ]; then
+        return 0
+    fi
+
+    bq_release_build_lock
+    log_verbose "Build lock released"
+}
+
+# Check if we're blocked by another operation
+check_queue_status() {
+    if [ "$BUILD_QUEUE_AVAILABLE" != "true" ]; then
+        return 1  # Not blocked (queue not available)
+    fi
+
+    if bq_is_blocked; then
+        log_info "Build queue status: $(bq_get_state)"
+        return 0  # Blocked
+    fi
+
+    return 1  # Not blocked
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,11 +394,15 @@ update_spinner() {
     start_spinner "$message"
 }
 
-# Cleanup spinner on exit
-cleanup_spinner() {
+# Cleanup on exit (spinner + build queue locks)
+cleanup_all() {
     stop_spinner
+    # Release any held build queue locks
+    if [ "$BUILD_QUEUE_AVAILABLE" = "true" ]; then
+        bq_cleanup 2>/dev/null || true
+    fi
 }
-trap cleanup_spinner EXIT INT TERM
+trap cleanup_all EXIT INT TERM
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Letta Memory Functions
@@ -2104,8 +2234,17 @@ Project context:
 $context"
         fi
 
+        # Acquire write lock before AI code generation
+        if ! acquire_write_access; then
+            log_error "Failed to acquire write lock"
+            update_session_context "$CURRENT_ATTEMPT" "queue_timeout" "Write lock timeout"
+            is_followup="true"
+            continue
+        fi
+
         # Generate code with AI
         if ! run_ai_cli "$prompt_content"; then
+            release_write_access
             update_session_context "$CURRENT_ATTEMPT" "ai_error" "AI CLI failed"
             log_error "AI CLI call failed"
             # Note: run_ai_cli handles auth error detection internally
@@ -2114,15 +2253,27 @@ $context"
             continue
         fi
 
+        release_write_access
         update_session_context "$CURRENT_ATTEMPT" "ai_success" "AI code generated"
+
+        # Acquire build lock before verification
+        if ! acquire_build_access; then
+            log_error "Failed to acquire build lock"
+            update_session_context "$CURRENT_ATTEMPT" "queue_timeout" "Build lock timeout"
+            is_followup="true"
+            continue
+        fi
 
         # Verify build
         if run_build_lint; then
+            release_build_access
             # Success!
             update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
             write_success_status
             return 0
         fi
+
+        release_build_access
 
         # Build still failing - get new errors
         error_feedback=$(get_error_feedback)
@@ -2158,14 +2309,22 @@ run_lint_only() {
         echo ""
     } > "$SESSION_FILE"
 
+    # Acquire build lock for initial verification
+    if ! acquire_build_access; then
+        log_warning "Could not acquire build lock, waiting..."
+    fi
+
     # Run initial build verification
     if run_build_lint; then
+        release_build_access
         # Success! No errors to fix
         update_session_context "0" "success" "Build passed - no errors to fix"
         write_success_status
         log_success "Build passed! No errors detected."
         return 0
     fi
+
+    release_build_access
 
     # Build failed - use errors as input for AI repair loop
     local error_feedback
@@ -2248,8 +2407,18 @@ run_build_loop() {
             prompt=$(build_followup_prompt "$error_feedback" "$CURRENT_ATTEMPT" "$input_content" "$context")
         fi
 
+        # Acquire write lock before code generation (prevents concurrent modifications)
+        if ! acquire_write_access; then
+            log_error "Failed to acquire write lock - another agent may be stuck"
+            error_feedback="Build coordination timeout. Another agent may be stuck."
+            update_session_context "$CURRENT_ATTEMPT" "queue_timeout" "$error_feedback"
+            is_followup="true"
+            continue
+        fi
+
         # Run AI CLI with session
         if ! run_ai_cli "$prompt" "$is_followup"; then
+            release_write_access  # Release lock on failure
             log_error "${AI_PROVIDER} CLI failed"
             error_feedback="${AI_PROVIDER} CLI invocation failed. Please try again."
             update_session_context "$CURRENT_ATTEMPT" "cursor_failed" "$error_feedback"
@@ -2257,13 +2426,28 @@ run_build_loop() {
             continue
         fi
 
+        # Release write lock, acquire build lock (allows other agents to queue up)
+        release_write_access
+
+        if ! acquire_build_access; then
+            log_error "Failed to acquire build lock - another agent may be stuck"
+            error_feedback="Build coordination timeout during build phase."
+            update_session_context "$CURRENT_ATTEMPT" "queue_timeout" "$error_feedback"
+            is_followup="true"
+            continue
+        fi
+
         # Run build verification
+        local build_result=0
         if run_build_lint; then
+            release_build_access  # Release lock after build
             # Success!
             update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
             write_success_status
             return 0
         fi
+
+        release_build_access  # Release lock after build (even on failure)
 
         # Get error feedback for next attempt
         error_feedback=$(get_error_feedback)
@@ -2418,6 +2602,9 @@ main() {
 
     # Setup directories
     setup_directories
+
+    # Initialize build queue coordination (prevents concurrent conflicts)
+    init_build_queue
 
     # Validate inputs
     if ! validate_inputs; then

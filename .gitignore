@@ -28,6 +28,7 @@ Package.resolved
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 *~
@@ -46,6 +47,7 @@ ENV/
 *.tmp
 *.temp
 *.bak
+*.backup
 *.swp
 *~
 
@@ -64,4 +66,10 @@ TODO.md
 
 # Foundation Swift project (now in separate repo: Eocon-Foundation-Swift)
 Foundation/
+
+# Build queue runtime state
+.Foundation/.buildqueue/
+
+# Letta agent cache
+.letta/
 

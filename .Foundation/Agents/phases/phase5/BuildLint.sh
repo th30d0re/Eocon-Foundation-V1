@@ -570,8 +570,16 @@ build_destination() {
         return 0
     fi
 
-    # Default to iOS Simulator
-    DESTINATION="platform=iOS Simulator,name=iPhone 16"
+    # Default to iOS Simulator - auto-detect first available iPhone simulator
+    # Parse output format: "    iPhone 17 Pro (UUID) (Status)"
+    local available_sim
+    available_sim=$(xcrun simctl list devices available 2>/dev/null | grep -E "^\s+iPhone" | head -1 | sed 's/^[[:space:]]*//' | sed 's/ ([A-F0-9-]*).*//')
+    if [ -n "$available_sim" ]; then
+        DESTINATION="platform=iOS Simulator,name=$available_sim"
+    else
+        # Fallback to generic destination
+        DESTINATION="platform=iOS Simulator,name=Any iOS Simulator Device"
+    fi
     log_info "Using default simulator destination: $DESTINATION"
     return 0
 }
