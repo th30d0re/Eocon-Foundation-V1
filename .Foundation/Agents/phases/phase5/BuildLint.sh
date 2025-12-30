@@ -561,7 +561,23 @@ detect_scheme() {
 # Build destination string from target ID
 build_destination() {
     if [ -n "$DESTINATION" ]; then
-        return 0
+        # Sanitize destination - remove invalid OS:latest parameter
+        if echo "$DESTINATION" | grep -q "OS:latest"; then
+            log_warning "Removing invalid 'OS:latest' from destination"
+            DESTINATION=$(echo "$DESTINATION" | sed 's/,\s*OS:latest//g' | sed 's/OS:latest,\s*//g')
+        fi
+        # If destination specifies a specific device name, verify it exists
+        if echo "$DESTINATION" | grep -q "name=iPhone 16"; then
+            local sim_exists
+            sim_exists=$(xcrun simctl list devices available 2>/dev/null | grep -c "iPhone 16" || true)
+            if [ "$sim_exists" -eq 0 ]; then
+                log_warning "iPhone 16 simulator not found, falling back to auto-detection"
+                DESTINATION=""
+            fi
+        fi
+        if [ -n "$DESTINATION" ]; then
+            return 0
+        fi
     fi
 
     if [ -n "$TARGET_ID" ]; then

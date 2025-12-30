@@ -2,6 +2,25 @@
 
 All notable changes to the Foundation Framework will be documented in this file.
 
+## [0.5.1] - 2025-12-30
+
+### Added
+
+#### Traycer CLI Agent Documentation
+- **traycer-cli-agents.md** - Comprehensive guide for creating Traycer CLI agent scripts
+  - Environment variable reference (`$TRAYCER_PROMPT_TMP_FILE`, `$TRAYCER_TASK_ID`, etc.)
+  - Script templates for all AI providers (Claude, Letta, Codex, Gemini, Cursor)
+  - BuildAgent options reference table
+  - Explanation of `stdbuf -oL -eL` for real-time output buffering
+  - Step-by-step guide for creating new agent scripts
+  - Advanced configurations (Swift docs, custom plans, retry attempts)
+  - Troubleshooting section
+
+### Documentation
+- New `.Foundation/Guides/traycer-cli-agents.md` for Traycer integration
+
+---
+
 ## [1.2.0] - 2025-11-01
 
 ### 🎉 Major Release: Full Constitution Compliance

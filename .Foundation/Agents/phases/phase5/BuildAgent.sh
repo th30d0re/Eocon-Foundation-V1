@@ -36,26 +36,58 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$PWD"  # Current working directory where user invoked the command
 
-# Load helper libraries
-HELPERS_LIB="${PROJECT_ROOT}/.foundation/lib/helpers.sh"
-ERRORS_LIB="${PROJECT_ROOT}/.foundation/lib/errors.sh"
-AI_PROVIDER_LIB="${PROJECT_ROOT}/.foundation/lib/ai_provider.sh"
+# Find Foundation lib directory (check multiple locations)
+find_foundation_lib() {
+    local lib_locations=(
+        "${FOUNDATION_LIB_PATH:-}"
+        "${PROJECT_ROOT}/.foundation/lib"
+        "${PROJECT_ROOT}/.Foundation/lib"
+        "${WORK_DIR}/.foundation/lib"
+        "${WORK_DIR}/.Foundation/lib"
+        "${HOME}/.foundation/lib"
+        "/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/lib"
+    )
 
-if [ -f "$HELPERS_LIB" ]; then
+    for loc in "${lib_locations[@]}"; do
+        if [ -n "$loc" ] && [ -d "$loc" ]; then
+            echo "$loc"
+            return 0
+        fi
+    done
+    return 1
+}
+
+FOUNDATION_LIB_DIR=$(find_foundation_lib) || FOUNDATION_LIB_DIR=""
+
+# Load helper libraries
+if [ -n "$FOUNDATION_LIB_DIR" ]; then
+    HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+    ERRORS_LIB="${FOUNDATION_LIB_DIR}/errors.sh"
+    AI_PROVIDER_LIB="${FOUNDATION_LIB_DIR}/ai_provider.sh"
+else
+    HELPERS_LIB=""
+    ERRORS_LIB=""
+    AI_PROVIDER_LIB=""
+fi
+
+if [ -n "$HELPERS_LIB" ] && [ -f "$HELPERS_LIB" ]; then
     # shellcheck disable=SC1090
     source "$HELPERS_LIB"
 fi
 
-if [ -f "$ERRORS_LIB" ]; then
+if [ -n "$ERRORS_LIB" ] && [ -f "$ERRORS_LIB" ]; then
     # shellcheck disable=SC1090
     source "$ERRORS_LIB"
 fi
 
 # Build queue coordination library (prevents concurrent write/build conflicts)
-BUILD_QUEUE_LIB="${PROJECT_ROOT}/.foundation/lib/BuildQueue.sh"
 BUILD_QUEUE_ENABLED="${BUILD_QUEUE_ENABLED:-true}"  # Set to false to disable coordination
+BUILD_QUEUE_LIB=""
+if [ -n "$FOUNDATION_LIB_DIR" ]; then
+    BUILD_QUEUE_LIB="${FOUNDATION_LIB_DIR}/BuildQueue.sh"
+fi
 
-if [ -f "$BUILD_QUEUE_LIB" ] && [ "$BUILD_QUEUE_ENABLED" = "true" ]; then
+if [ -n "$BUILD_QUEUE_LIB" ] && [ -f "$BUILD_QUEUE_LIB" ] && [ "$BUILD_QUEUE_ENABLED" = "true" ]; then
     # shellcheck disable=SC1090
     source "$BUILD_QUEUE_LIB"
     BUILD_QUEUE_AVAILABLE=true
@@ -84,6 +116,7 @@ STATUS_DIR=""
 PLAN_FILE=""
 PROMPT_FILE=""
 PROMPT_STRING=""
+PROMPT_CONTENT=""  # Cached content (read immediately to avoid temp file deletion)
 CONTEXT_PATHS=()
 SWIFT_DOCS_PATH="${PROJECT_ROOT}/Docs/swiftDocs"
 
@@ -116,6 +149,7 @@ STREAM_OUTPUT="${STREAM_OUTPUT:-false}"
 SKIP_CHAT_ID_CAPTURE="${SKIP_CHAT_ID_CAPTURE:-false}"  # Skip cursor chat ID capture (can be slow/unreliable)
 YOLO_MODE="${YOLO_MODE:-false}"  # Automation mode: enables verbose, skip-chat-id, stream output
 LINT_ONLY_MODE="${LINT_ONLY_MODE:-false}"  # No AI input - just run lint and build
+SMART_DOCS="${SMART_DOCS:-true}"  # Use cursor-agent RAG to filter relevant swift docs
 
 # Letta Memory integration (set by BuildVerify.sh orchestrator)
 LETTA_MEMORY_AGENT="${LETTA_MEMORY_AGENT:-}"  # Memory agent name
@@ -534,7 +568,12 @@ CONTEXT OPTIONS:
     --context <path>        MD file or directory with MD files (can be repeated)
     --swift-docs <path>     Path to Swift documentation (auto-detected if not provided)
     --no-swift-docs         Skip Swift docs context (disables auto-detection)
-    
+    --no-smart-docs         Disable smart docs filtering (include all docs instead of RAG-selected)
+
+    Smart docs filtering (enabled by default):
+      Uses cursor-agent RAG to select only relevant Swift docs for the task,
+      dramatically reducing context size. Falls back to all docs if unavailable.
+
     Auto-detection searches these locations:
       • Docs/swiftDocs, docs/swiftDocs
       • Documentation/swiftDocs, documentation/swiftDocs
@@ -756,10 +795,22 @@ setup_directories() {
 }
 
 validate_inputs() {
+    # IMMEDIATELY cache prompt/plan content before any slow operations
+    # Traycer deletes temp files after 30 seconds, so read them NOW
+    if [ -n "$PROMPT_FILE" ] && [ -f "$PROMPT_FILE" ] && [ -z "$PROMPT_CONTENT" ]; then
+        PROMPT_CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || true)
+        log_verbose "Cached prompt content (${#PROMPT_CONTENT} chars)"
+    elif [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ] && [ -z "$PROMPT_CONTENT" ]; then
+        PROMPT_CONTENT=$(cat "$PLAN_FILE" 2>/dev/null || true)
+        log_verbose "Cached plan content (${#PROMPT_CONTENT} chars)"
+    elif [ -n "$PROMPT_STRING" ] && [ -z "$PROMPT_CONTENT" ]; then
+        PROMPT_CONTENT="$PROMPT_STRING"
+    fi
+
     start_spinner "Validating configuration"
 
     # Check if any input is provided - if not, run in lint-only mode
-    if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ]; then
+    if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ] && [ -z "$PROMPT_CONTENT" ]; then
         LINT_ONLY_MODE="true"
         log_info "No AI input provided - running in auto-detect mode (build first, AI repair if needed)"
     fi
@@ -1533,6 +1584,76 @@ $(cat "$md_file")
     echo "$content"
 }
 
+# Filter swift docs using cursor-agent's RAG to select only relevant files
+# This dramatically reduces context size while keeping relevant documentation
+filter_swift_docs_via_cursor() {
+    local prompt="$1"
+    local docs_dir="$2"
+    local filtered_files=()
+
+    if ! command -v cursor-agent >/dev/null 2>&1; then
+        log_warning "cursor-agent not found, falling back to unfiltered docs"
+        return 1
+    fi
+
+    log_verbose "Filtering Swift docs via cursor-agent RAG..."
+
+    # Ask cursor-agent which files are relevant (uses its RAG index)
+    local selector_prompt="Given this task: $prompt
+
+List ONLY the absolute file paths from $docs_dir that are most relevant to this task.
+Output one path per line, nothing else. Maximum 15 files."
+
+    local cursor_output
+    cursor_output=$(cursor-agent --print --force --output-format text --workspace "$WORK_DIR" "$selector_prompt" 2>/dev/null || true)
+
+    # Extract file paths from output (lines that look like paths ending in .md)
+    while IFS= read -r line; do
+        # Clean the line and check if it's a valid path
+        local cleaned_path
+        cleaned_path=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -E '\.md$' || true)
+        if [ -n "$cleaned_path" ] && [ -f "$cleaned_path" ]; then
+            filtered_files+=("$cleaned_path")
+        elif [ -n "$cleaned_path" ]; then
+            # Try relative to docs_dir
+            local rel_path="${docs_dir}/${cleaned_path#./}"
+            if [ -f "$rel_path" ]; then
+                filtered_files+=("$rel_path")
+            fi
+        fi
+    done <<< "$cursor_output"
+
+    if [ ${#filtered_files[@]} -eq 0 ]; then
+        log_verbose "No relevant docs found via RAG, checking for fallback..."
+        return 1
+    fi
+
+    log_info "Smart docs: Selected ${#filtered_files[@]} relevant files from Swift docs"
+
+    # Output the filtered file paths
+    printf '%s\n' "${filtered_files[@]}"
+    return 0
+}
+
+# Read specific MD files (used with smart docs filtering)
+read_filtered_md_files() {
+    local content=""
+
+    while IFS= read -r md_file; do
+        if [ -f "$md_file" ]; then
+            local filename
+            filename=$(basename "$md_file")
+            content+="
+--- FILE: $filename ---
+$(cat "$md_file")
+--- END FILE ---
+"
+        fi
+    done
+
+    echo "$content"
+}
+
 # Gather all context into a single string
 gather_context() {
     local context=""
@@ -1551,11 +1672,29 @@ gather_context() {
         start_spinner "Gathering context"
     fi
 
-    # Add Swift docs if available
+    # Add Swift docs if available (with smart filtering by default)
     if [ -n "$SWIFT_DOCS_PATH" ] && [ "$SWIFT_DOCS_PATH" != "DISABLED" ] && [ -d "$SWIFT_DOCS_PATH" ]; then
         log_verbose "Adding Swift docs from: $SWIFT_DOCS_PATH"
-        local swift_docs_content
-        swift_docs_content=$(read_md_files_from_dir "$SWIFT_DOCS_PATH")
+        local swift_docs_content=""
+        local input_content
+        input_content=$(get_input_content)
+
+        # Try smart filtering first (uses cursor-agent RAG)
+        if [ "$SMART_DOCS" = "true" ] && [ -n "$input_content" ]; then
+            local filtered_files
+            if filtered_files=$(filter_swift_docs_via_cursor "$input_content" "$SWIFT_DOCS_PATH"); then
+                swift_docs_content=$(echo "$filtered_files" | read_filtered_md_files)
+            fi
+        fi
+
+        # Fall back to reading all docs if smart filtering failed or disabled
+        if [ -z "$swift_docs_content" ]; then
+            if [ "$SMART_DOCS" = "true" ]; then
+                log_verbose "Smart docs filtering unavailable, using all docs"
+            fi
+            swift_docs_content=$(read_md_files_from_dir "$SWIFT_DOCS_PATH")
+        fi
+
         if [ -n "$swift_docs_content" ]; then
             context+="
 === SWIFT DOCUMENTATION ===
@@ -1599,12 +1738,18 @@ $dir_content
 
 # Get the main prompt/plan content
 get_input_content() {
-    local content=""
+    # Use cached content if available (avoids temp file deletion issues)
+    if [ -n "$PROMPT_CONTENT" ]; then
+        echo "$PROMPT_CONTENT"
+        return
+    fi
 
-    if [ -n "$PLAN_FILE" ]; then
-        content=$(cat "$PLAN_FILE")
-    elif [ -n "$PROMPT_FILE" ]; then
-        content=$(cat "$PROMPT_FILE")
+    # Fallback to reading files (may fail if temp files were deleted)
+    local content=""
+    if [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ]; then
+        content=$(cat "$PLAN_FILE" 2>/dev/null || true)
+    elif [ -n "$PROMPT_FILE" ] && [ -f "$PROMPT_FILE" ]; then
+        content=$(cat "$PROMPT_FILE" 2>/dev/null || true)
     elif [ -n "$PROMPT_STRING" ]; then
         content="$PROMPT_STRING"
     fi
@@ -2503,6 +2648,10 @@ main() {
                 ;;
             --no-swift-docs)
                 SWIFT_DOCS_PATH="DISABLED"
+                shift 1
+                ;;
+            --no-smart-docs)
+                SMART_DOCS="false"
                 shift 1
                 ;;
             --ai-provider)
