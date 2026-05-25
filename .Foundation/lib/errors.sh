@@ -1,7 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Error Handling Library for Foundation Framework
 # Provides standardized error codes and error emission
+
+# Verify bash is running
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This library requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # Detect project root
 if [ -z "$PROJECT_ROOT" ]; then
@@ -23,29 +29,29 @@ get_error_message() {
         E001) echo "Constitution parsing failed" ;;
         E002) echo "Invalid Constitution format" ;;
         E003) echo "Missing required Constitution section" ;;
-        
+
         # Phase 1 errors
         E101) echo "Plan generation failed" ;;
         E102) echo "Wave decomposition failed" ;;
         E103) echo "Invalid wave count" ;;
         E104) echo "Test specification generation failed" ;;
-        
+
         # Phase 2 errors
         E201) echo "Question analysis failed" ;;
         E202) echo "Ambiguity detection failed" ;;
         E203) echo "Questions.md generation failed" ;;
-        
+
         # Phase 3 errors
         E301) echo "Plan optimization failed" ;;
         E302) echo "Historical pattern analysis failed" ;;
         E303) echo "Test enhancement failed" ;;
-        
+
         # Phase 4 errors
         E401) echo "Dependency analysis failed" ;;
         E402) echo "Stage calculation failed" ;;
         E403) echo "Critical path identification failed" ;;
         E404) echo "stages.md generation failed" ;;
-        
+
         # Phase 5 errors
         E501) echo "Code generation failed" ;;
         E502) echo "Test execution failed" ;;
@@ -60,7 +66,7 @@ get_error_message() {
         E511) echo "File write operation failed" ;;
         E512) echo "Test sandbox setup failed" ;;
         E513) echo "Stage execution failed" ;;
-        
+
         # System/Orchestrator errors
         E901) echo "AI provider unavailable" ;;
         E902) echo "Configuration error" ;;
@@ -68,7 +74,7 @@ get_error_message() {
         E904) echo "Permission denied" ;;
         E905) echo "Resource limit exceeded" ;;
         E906) echo "Unexpected system error" ;;
-        
+
         *) echo "Unknown error" ;;
     esac
 }
@@ -83,20 +89,20 @@ emit_error() {
     local error_code="$1"
     local message="$2"
     local context="${3:-}"
-    
+
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local error_id="$(uuidgen 2>/dev/null || date +%s)"
-    
+
     # Get standard error message for code
     local standard_message="$(get_error_message "$error_code")"
-    
+
     # Log to console
     if command -v foundation_log >/dev/null 2>&1; then
         foundation_log "error" "[$error_code] $standard_message: $message"
     else
         echo "[ERROR] [$error_code] $standard_message: $message" >&2
     fi
-    
+
     # Create detailed error report
     local error_file="${ERRORS_DIR}/${timestamp}_${error_code}.json"
     cat > "$error_file" << EOF
@@ -113,7 +119,7 @@ emit_error() {
   "resolved": false
 }
 EOF
-    
+
     # Return error code for caller
     return 1
 }
@@ -124,9 +130,9 @@ emit_error_and_escalate() {
     local error_code="$1"
     local message="$2"
     local context="${3:-}"
-    
+
     emit_error "$error_code" "$message" "$context"
-    
+
     # Mark as escalated in the error file
     local error_file=$(ls -t "${ERRORS_DIR}"/*_${error_code}.json 2>/dev/null | head -1)
     if [ -f "$error_file" ]; then
@@ -141,7 +147,7 @@ try:
 except: pass
 " 2>/dev/null || true
     fi
-    
+
     # Trigger human intervention workflow
     escalate_to_human "$error_code" "$message" "$context"
 }
@@ -151,7 +157,7 @@ escalate_to_human() {
     local error_code="$1"
     local message="$2"
     local context="${3:-}"
-    
+
     echo "" >&2
     echo "═══════════════════════════════════════════════════════" >&2
     echo "  HUMAN INTERVENTION REQUIRED" >&2
@@ -170,11 +176,11 @@ escalate_to_human() {
     echo "  2. Skip this step and continue (may cause failures)" >&2
     echo "  3. Abort execution" >&2
     echo "" >&2
-    
+
     # Wait for user input
     read -p "Enter choice (1/2/3): " -n 1 -r
     echo "" >&2
-    
+
     case $REPLY in
         1)
             echo "Please fix the error and press Enter to retry..." >&2
@@ -200,7 +206,7 @@ escalate_to_human() {
 should_escalate() {
     local error_code="$1"
     local retry_count="${2:-0}"
-    
+
     # Critical errors (E5xx series for Phase 5)
     case "$error_code" in
         E503)
@@ -228,7 +234,7 @@ should_escalate() {
             return 0
             ;;
     esac
-    
+
     return 1
 }
 
@@ -237,7 +243,7 @@ log_error_recovery() {
     local error_code="$1"
     local attempt="$2"
     local action="$3"
-    
+
     if command -v foundation_log >/dev/null 2>&1; then
         foundation_log "info" "[$error_code] Recovery attempt $attempt: $action"
     else
@@ -248,7 +254,7 @@ log_error_recovery() {
 # Mark error as resolved
 resolve_error() {
     local error_code="$1"
-    
+
     local error_file=$(ls -t "${ERRORS_DIR}"/*_${error_code}.json 2>/dev/null | head -1)
     if [ -f "$error_file" ]; then
         python3 -c "
@@ -262,7 +268,7 @@ try:
         json.dump(data, f, indent=2)
 except: pass
 " 2>/dev/null || true
-        
+
         if command -v foundation_log >/dev/null 2>&1; then
             foundation_log "success" "[$error_code] Error resolved"
         else
@@ -276,7 +282,7 @@ get_unresolved_errors() {
     if [ ! -d "$ERRORS_DIR" ]; then
         return 0
     fi
-    
+
     python3 -c "
 import json
 import os
@@ -297,14 +303,14 @@ try:
                     'message': data['standard_message'],
                     'timestamp': data['timestamp']
                 })
-    
+
     if unresolved:
         print('Unresolved errors:')
         for err in unresolved:
             print(f\"  [{err['code']}] {err['message']} ({err['timestamp']})\")
     else:
         print('No unresolved errors')
-        
+
 except Exception as e:
     print(f'Error reading error logs: {e}', file=sys.stderr)
     sys.exit(1)
@@ -317,4 +323,3 @@ export -f emit_error_and_escalate
 export -f should_escalate
 export -f log_error_recovery
 export -f resolve_error
-

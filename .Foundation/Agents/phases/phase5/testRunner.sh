@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Test Runner Agent
 # Executes tests and generates comprehensive reports with recordings
@@ -18,10 +18,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/lib"
+FOUNDATION_LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
+
+# Load Foundation helpers and check shell compatibility
+HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+if [ -f "$HELPERS_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
+fi
 
 # Source utility libraries
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testUtils.sh"
+source "${LIB_DIR}/simulator.sh"
+source "${LIB_DIR}/simulator_prepare.sh"
+source "${LIB_DIR}/log_capture.sh"
+source "${LIB_DIR}/session_store.sh"
 
 # Set log prefix for this agent
 LOG_PREFIX="[RUNNER]"
@@ -43,6 +60,21 @@ REPORT_DIR=""
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-./Artifacts}"
 VERBOSE="${VERBOSE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+
+# Simulator management variables
+AUTO_BOOT="${AUTO_BOOT:-false}"
+SIMULATOR_NAME=""
+GPS_LOCATION=""
+GPS_LAT=""
+GPS_LON=""
+APPEARANCE_MODE=""
+CAPTURE_LOGS="${CAPTURE_LOGS:-false}"
+LOG_SESSION=""
+
+# AXe integration variables
+USE_AXE="${USE_AXE:-false}"
+DESCRIBE_UI_BEFORE_TESTS="${DESCRIBE_UI_BEFORE_TESTS:-false}"
+UI_HIERARCHY_OUTPUT=""
 
 # State variables
 TOTAL_TESTS=0
@@ -85,6 +117,16 @@ OPTIONS:
     --artifacts-dir <path>  Artifacts output directory
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
+
+  SIMULATOR MANAGEMENT:
+    --auto-boot             Auto-boot simulator if not running
+    --simulator-name <name> Simulator to use (from session or flag)
+    --set-location <lat,lon> Set GPS location before tests
+    --appearance <mode>     Set dark/light mode
+    --capture-logs          Enable structured log capture
+    --use-axe               Enable AXe UI automation support
+    --describe-ui           Capture UI hierarchy before tests
+
     --help                  Show this help message
 
 EXAMPLES:
@@ -99,6 +141,9 @@ EXAMPLES:
 
     # Using test plan
     $0 --test-plan Tests.xctestplan
+
+    # With AXe UI automation and live UI description
+    $0 --use-axe --describe-ui --simulator-name "iPhone 16"
 
 EXIT CODES:
     0   All tests passed
@@ -185,6 +230,36 @@ parse_arguments() {
                 ;;
             --dry-run)
                 DRY_RUN="true"
+                shift 1
+                ;;
+            --auto-boot)
+                AUTO_BOOT="true"
+                shift 1
+                ;;
+            --simulator-name)
+                SIMULATOR_NAME="${2:-}"
+                shift 2
+                ;;
+            --set-location)
+                GPS_LOCATION="${2:-}"
+                GPS_LAT=$(echo "$GPS_LOCATION" | cut -d',' -f1)
+                GPS_LON=$(echo "$GPS_LOCATION" | cut -d',' -f2)
+                shift 2
+                ;;
+            --appearance)
+                APPEARANCE_MODE="${2:-}"
+                shift 2
+                ;;
+            --capture-logs)
+                CAPTURE_LOGS="true"
+                shift 1
+                ;;
+            --use-axe)
+                USE_AXE="true"
+                shift 1
+                ;;
+            --describe-ui)
+                DESCRIBE_UI_BEFORE_TESTS="true"
                 shift 1
                 ;;
             --help|-h)
@@ -433,6 +508,66 @@ build_test_command() {
 run_tests() {
     log_section "Executing tests..."
 
+    # Prepare simulator if auto-boot is enabled
+    if [ "$AUTO_BOOT" = "true" ] && [ -n "$SIMULATOR_NAME" ]; then
+        log_info "Preparing simulator: $SIMULATOR_NAME"
+
+        # Get simulator UUID
+        SIMULATOR_UDID=$(get_simulator_by_name "$SIMULATOR_NAME") || {
+            log_error "Failed to resolve simulator: $SIMULATOR_NAME"
+            return 12
+        }
+
+        # Check if simulator is booted
+        if [ "$(is_simulator_booted "$SIMULATOR_UDID")" != "true" ]; then
+            log_info "Booting simulator: $SIMULATOR_NAME"
+            boot_simulator "$SIMULATOR_NAME" true > /dev/null || {
+                log_error "Failed to boot simulator"
+                return 12
+            }
+        else
+            log_info "Simulator already booted"
+        fi
+
+        # Configure simulator
+        if [ -n "$GPS_LAT" ] && [ -n "$GPS_LON" ]; then
+            log_info "Setting GPS location: $GPS_LAT, $GPS_LON"
+            set_simulator_location "$SIMULATOR_UDID" "$GPS_LAT" "$GPS_LON" > /dev/null || {
+                log_warning "Failed to set GPS location"
+            }
+        fi
+
+        if [ -n "$APPEARANCE_MODE" ]; then
+            log_info "Setting appearance: $APPEARANCE_MODE"
+            set_simulator_appearance "$SIMULATOR_UDID" "$APPEARANCE_MODE" > /dev/null || {
+                log_warning "Failed to set appearance"
+            }
+        fi
+    fi
+
+    # Start log capture if enabled
+    if [ "$CAPTURE_LOGS" = "true" ] && command -v start_log_capture &>/dev/null; then
+        log_info "Starting log capture..."
+        LOG_SESSION=$(start_log_capture "iOS" "test" "${SCHEME:-TestRun}") || {
+            log_warning "Failed to start log capture"
+        }
+        # Register cleanup trap
+        trap 'stop_log_capture "$LOG_SESSION" 2>/dev/null || true' EXIT
+    fi
+
+    # Describe UI via AXe if enabled
+    if [ "$USE_AXE" = "true" ] && [ "$DESCRIBE_UI_BEFORE_TESTS" = "true" ]; then
+        if command -v is_axe_available &>/dev/null && is_axe_available; then
+            log_info "Capturing UI hierarchy via AXe..."
+            UI_HIERARCHY_OUTPUT="${ARTIFACTS_DIR}/ui_hierarchy_pre_test.json"
+            JSON_OUTPUT=false axe_describe_ui "$SIMULATOR_UDID" > "$UI_HIERARCHY_OUTPUT" || {
+                log_warning "Failed to capture UI hierarchy"
+            }
+        else
+            log_warning "AXe not available, skipping UI description"
+        fi
+    fi
+
     local test_cmd
     test_cmd=$(build_test_command)
 
@@ -471,6 +606,12 @@ run_tests() {
     # Capture failure screenshot if tests failed
     if [ $exit_code -ne 0 ] && [ "$SCREENSHOT_ON_FAIL" = "true" ]; then
         capture_screenshot "test_failure"
+    fi
+
+    # Stop log capture
+    if [ "$CAPTURE_LOGS" = "true" ] && [ -n "$LOG_SESSION" ]; then
+        log_info "Stopping log capture..."
+        stop_log_capture "$LOG_SESSION" 2>/dev/null || true
     fi
 
     log_verbose "Test execution completed in ${TEST_DURATION}s (exit code: $exit_code)"
@@ -579,6 +720,7 @@ generate_test_report() {
             <tr><td>Destinations</td><td>${DESTINATIONS:-default}</td></tr>
             <tr><td>Parallel</td><td>${PARALLEL}</td></tr>
             <tr><td>Recording</td><td>${RECORD}</td></tr>
+            <tr><td>AXe Enabled</td><td>${USE_AXE}</td></tr>
         </table>
     </div>
 
@@ -587,6 +729,7 @@ generate_test_report() {
         <ul>
             <li><a href='TestResults.xcresult'>Test Results Bundle</a></li>
             $([ -f "$REPORT_DIR/coverage.json" ] && echo "<li><a href='coverage.json'>Coverage Report</a></li>")
+            $([ -n "$UI_HIERARCHY_OUTPUT" ] && [ -f "$UI_HIERARCHY_OUTPUT" ] && echo "<li><a href='$(basename "$UI_HIERARCHY_OUTPUT")'>UI Hierarchy (Pre-Test)</a></li>")
             $([ -d "$REPORT_DIR/screenshots" ] && ls "$REPORT_DIR/screenshots"/*.png 2>/dev/null | head -5 | while read f; do echo "<li><a href='screenshots/$(basename "$f")'>$(basename "$f")</a></li>"; done)
             $([ -d "$REPORT_DIR/recordings" ] && ls "$REPORT_DIR/recordings"/*.mp4 2>/dev/null | head -3 | while read f; do echo "<li><a href='recordings/$(basename "$f")'>$(basename "$f")</a></li>"; done)
         </ul>

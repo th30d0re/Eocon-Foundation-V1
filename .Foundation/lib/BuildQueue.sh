@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # BuildQueue.sh - Centralized Build Coordination System
 # Prevents concurrent write/build conflicts across multiple BuildAgent instances
@@ -17,6 +17,12 @@
 #   QUEUED   - Agent waiting for turn
 
 set -euo pipefail
+
+# Verify bash is running
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This library requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # =============================================================================
 # Configuration

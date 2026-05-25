@@ -1,10 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Test Utilities Library for Foundation Test Agents
 # Provides shared functions for all test agents
 # Sources: helpers.sh, ai_provider.sh, errors.sh
 
 set -euo pipefail
+
+# Verify bash is running
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This library requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration and Path Detection
@@ -32,6 +38,11 @@ AI_PROVIDER_LIB="${FOUNDATION_LIB_DIR}/ai_provider.sh"
 if [ -f "$HELPERS_LIB" ]; then
     # shellcheck disable=SC1090
     source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
 fi
 
 if [ -f "$ERRORS_LIB" ]; then

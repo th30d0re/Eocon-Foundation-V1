@@ -2,6 +2,53 @@
 
 All notable changes to the Foundation Framework will be documented in this file.
 
+## [0.5.2] - 2026-01-07
+
+### Changed
+
+#### Default AI Provider
+- **Changed default AI provider from Cursor to GitHub Copilot** 
+  - New default: `AI_PROVIDER=copilot` (uses `copilot --allow-all-tools --allow-all-paths`)
+  - Previous defaults: `cursor` (v0.5.1), `codex` (earlier in v0.5.2)
+  - Reason: GitHub Copilot provides excellent code generation with built-in GitHub integration
+  - Override: Use `--ai-provider codex` or set `AI_PROVIDER=codex` environment variable
+  - Added `--allow-all-paths` flag for unrestricted file access in automation mode
+  - **Fixed**: Changed from `-p` argument to stdin pipe to avoid "Argument list too long" errors with large prompts
+
+### Fixed
+
+#### CLI Streaming Output (--stream flag)
+- **Implemented real-time streaming output with unbuffered execution**
+  - Added multi-method unbuffering: `stdbuf` (Linux), `unbuffer` (expect), `script` (BSD/macOS)
+  - Graceful fallback detection when unbuffering tools unavailable
+  - Separated spinner from streaming to prevent output conflicts
+  - **Critical Fix**: Spinner no longer runs concurrently with streaming output
+  - Added `run_unbuffered()` and `unbuffered_tee()` helper functions
+  - Unbuffered tee prevents buffering in the output pipeline
+- **Provider-specific streaming enhancements**
+  - Cursor: Uses native `--stream` flag when available
+  - Letta: Uses `--output-format stream-json` (already implemented)
+  - Codex/Claude: Relies on shell unbuffering
+- **Improved streaming UX**
+  - Status messages instead of spinner during streaming
+  - Clear visual separators for CLI output sections
+  - Real-time completion/failure indicators
+- **Verbose logging for streaming mode**
+  - Logs detected unbuffering method
+  - Warns when no unbuffering tools available
+  - Shows provider-specific streaming capabilities
+
+#### BuildAgent Chat ID Capture Hang
+- **Cursor Chat ID Timeout Mechanism** - Replaced unreliable `timeout` command with robust background process management
+  - Prevents indefinite hangs when `cursor-agent ls` enters stopped/suspended state
+  - Uses background process with 2-second polling and force-kill fallback
+  - Properly handles process cleanup to avoid zombie processes
+- **Issue**: `cursor-agent ls` could enter "T" (stopped) state, causing `timeout` command to fail and BuildAgent to hang indefinitely during "Capturing chat session ID" phase
+- **Solution**: Background process with active polling and guaranteed kill after 2 seconds
+- **Workaround**: Use `--skip-chat-id` or `--yolo` flag to bypass chat ID capture entirely
+
+---
+
 ## [0.5.1] - 2025-12-30
 
 ### Added

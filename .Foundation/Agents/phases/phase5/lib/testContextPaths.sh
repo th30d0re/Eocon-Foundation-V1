@@ -1,7 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Test Context Paths Configuration
 # Defines context path arrays for documentation used by test agents
+
+# Verify bash is running
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This library requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Base Documentation Paths

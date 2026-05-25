@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # UI Test Agent
 # Generates XCUITest files from flow definitions
@@ -19,12 +19,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/lib"
 TEMPLATES_DIR="${SCRIPT_DIR}/templates"
+FOUNDATION_LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
+
+# Load Foundation helpers and check shell compatibility
+HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+if [ -f "$HELPERS_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
+fi
 
 # Source utility libraries
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testUtils.sh"
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testContextPaths.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/axe_helpers.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/simulator.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/simulator_prepare.sh"
 
 # Set log prefix for this agent
 LOG_PREFIX="[UI-TEST]"
@@ -41,6 +60,15 @@ ARTIFACTS_DIR="${ARTIFACTS_DIR:-./Artifacts}"
 VERBOSE="${VERBOSE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 GENERATE_PAGE_OBJECTS="${GENERATE_PAGE_OBJECTS:-true}"
+
+# AXe UI automation variables
+USE_AXE="${USE_AXE:-false}"
+DESCRIBE_UI="${DESCRIBE_UI:-false}"
+VALIDATE_IDENTIFIERS="${VALIDATE_IDENTIFIERS:-false}"
+CAPTURE_BASELINE="${CAPTURE_BASELINE:-false}"
+SIMULATOR_NAME=""
+APP_PATH=""
+BUNDLE_ID=""
 
 # State variables
 UI_TESTS_GENERATED=0
@@ -74,6 +102,16 @@ OPTIONS:
     --artifacts-dir <path>  Output directory for artifacts
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
+
+  AXE UI AUTOMATION:
+    --use-axe               Enable AXe UI automation
+    --describe-ui           Dump view hierarchy before generation
+    --validate-identifiers  Validate elements exist via AXe
+    --capture-baseline      Screenshot for visual testing
+    --simulator-name <name> Simulator to use
+    --app-path <path>       Path to .app bundle
+    --bundle-id <id>        App bundle identifier
+
     --help                  Show this help message
 
 TEST GENERATION:
@@ -159,6 +197,34 @@ parse_arguments() {
             --dry-run)
                 DRY_RUN="true"
                 shift 1
+                ;;
+            --use-axe)
+                USE_AXE="true"
+                shift 1
+                ;;
+            --describe-ui)
+                DESCRIBE_UI="true"
+                shift 1
+                ;;
+            --validate-identifiers)
+                VALIDATE_IDENTIFIERS="true"
+                shift 1
+                ;;
+            --capture-baseline)
+                CAPTURE_BASELINE="true"
+                shift 1
+                ;;
+            --simulator-name)
+                SIMULATOR_NAME="${2:-}"
+                shift 2
+                ;;
+            --app-path)
+                APP_PATH="${2:-}"
+                shift 2
+                ;;
+            --bundle-id)
+                BUNDLE_ID="${2:-}"
+                shift 2
                 ;;
             --help|-h)
                 show_usage
@@ -267,6 +333,23 @@ get_flow_count() {
 build_ui_test_prompt() {
     local flow_json="$1"
     local context="$2"
+    local ui_hierarchy_json="${3:-}"
+
+    local ui_section=""
+    if [ -n "$ui_hierarchy_json" ]; then
+        ui_section="
+LIVE_UI_HIERARCHY:
+\`\`\`json
+$ui_hierarchy_json
+\`\`\`
+
+Use the live UI hierarchy to:
+1. Verify element identifiers exist in the actual UI
+2. Use accurate frame coordinates for element targeting
+3. Validate accessibility labels match the running app
+4. Generate tests that target real UI elements
+"
+    fi
 
     cat << EOF
 You are a Swift developer writing XCUITest UI tests.
@@ -275,7 +358,7 @@ FLOW DEFINITION:
 \`\`\`json
 $flow_json
 \`\`\`
-
+$ui_section
 TASK:
 Generate an XCUITest file that implements this flow.
 
@@ -321,6 +404,106 @@ Generate ONLY the Swift test file. No explanations.
 EOF
 }
 
+# Prepare simulator with AXe if enabled
+prepare_axe_environment() {
+    if [ "$USE_AXE" != "true" ]; then
+        return 0
+    fi
+
+    log_section "Preparing AXe environment"
+
+    # Check AXe availability
+    if ! is_axe_available; then
+        log_warning "AXe not installed. Install with: brew tap cameroncooke/axe && brew install axe"
+        log_warning "Falling back to XCUITest generation without live validation"
+        return 1
+    fi
+
+    # Validate required parameters
+    if [ -z "$SIMULATOR_NAME" ] || [ -z "$APP_PATH" ] || [ -z "$BUNDLE_ID" ]; then
+        log_error "AXe requires --simulator-name, --app-path, and --bundle-id"
+        return 1
+    fi
+
+    # Prepare simulator
+    log_info "Preparing simulator: $SIMULATOR_NAME"
+    SIMULATOR_UDID=$(prepare_simulator_for_testing "$SIMULATOR_NAME" "$APP_PATH" "$BUNDLE_ID") || {
+        log_error "Failed to prepare simulator"
+        return 1
+    }
+
+    # Wait for app to launch
+    sleep 2
+
+    # Always get UI hierarchy when using AXe
+    log_info "Capturing UI hierarchy..."
+    local ui_hierarchy="${ARTIFACTS_DIR}/ui_hierarchy.json"
+    mkdir -p "$(dirname "$ui_hierarchy")"
+
+    JSON_OUTPUT=false axe_describe_ui "$SIMULATOR_UDID" > "$ui_hierarchy" || {
+        log_error "Failed to capture UI hierarchy - cannot generate accurate tests"
+        return 1
+    }
+    log_success "UI hierarchy saved: $ui_hierarchy"
+
+    # Capture baseline screenshot if requested
+    if [ "$CAPTURE_BASELINE" = "true" ]; then
+        log_info "Capturing baseline screenshot..."
+        local screenshot="${ARTIFACTS_DIR}/baseline_screenshot.png"
+        mkdir -p "$(dirname "$screenshot")"
+
+        JSON_OUTPUT=false axe_screenshot "$SIMULATOR_UDID" "$screenshot" || {
+            log_warning "Failed to capture screenshot"
+        }
+    fi
+
+    return 0
+}
+
+# Validate element identifiers using AXe
+validate_element_identifiers() {
+    local test_file="$1"
+
+    if [ "$USE_AXE" != "true" ]; then
+        return 0
+    fi
+
+    if ! is_axe_available; then
+        return 0
+    fi
+
+    log_info "Validating element identifiers via AXe..."
+
+    # Extract accessibility identifiers from test file
+    local identifiers
+    identifiers=$(grep -oE '\["[^"]+"\]' "$test_file" | sed 's/\["\(.*\)"\]/\1/g' | sort -u)
+
+    local invalid_count=0
+    local valid_count=0
+    while IFS= read -r identifier; do
+        if [ -z "$identifier" ]; then
+            continue
+        fi
+
+        # Check if element exists
+        if ! JSON_OUTPUT=false axe_element_exists "$SIMULATOR_UDID" "$identifier" 2>/dev/null; then
+            log_warning "Element identifier not found in UI: $identifier"
+            invalid_count=$((invalid_count + 1))
+        else
+            valid_count=$((valid_count + 1))
+        fi
+    done <<< "$identifiers"
+
+    log_info "Validation results: $valid_count valid, $invalid_count invalid"
+    if [ $invalid_count -gt 0 ]; then
+        log_warning "Found $invalid_count invalid identifiers. Consider updating test or app accessibility labels."
+    else
+        log_success "All identifiers validated successfully"
+    fi
+
+    return 0
+}
+
 # Generate UI test for a flow
 generate_ui_test_for_flow() {
     local flow_json="$1"
@@ -338,9 +521,15 @@ generate_ui_test_for_flow() {
     local context
     context=$(gather_test_context "${UI_TEST_CONTEXT_PATHS[@]}")
 
+    # Load UI hierarchy if available
+    local ui_hierarchy_json=""
+    if [ -f "${ARTIFACTS_DIR}/ui_hierarchy.json" ]; then
+        ui_hierarchy_json=$(cat "${ARTIFACTS_DIR}/ui_hierarchy.json")
+    fi
+
     # Build prompt
     local prompt
-    prompt=$(build_ui_test_prompt "$flow_json" "$context")
+    prompt=$(build_ui_test_prompt "$flow_json" "$context" "$ui_hierarchy_json")
 
     # Determine test file path
     local test_file="${UI_TEST_TARGET_DIR}/${feature_name}UITests.swift"
@@ -650,6 +839,14 @@ generate_ui_test_report() {
 main() {
     parse_arguments "$@"
     initialize
+
+    # Prepare AXe environment if enabled
+    if [ "$USE_AXE" = "true" ]; then
+        prepare_axe_environment || {
+            log_warning "AXe environment preparation failed, continuing without AXe"
+            USE_AXE="false"
+        }
+    fi
 
     local exit_code=0
 

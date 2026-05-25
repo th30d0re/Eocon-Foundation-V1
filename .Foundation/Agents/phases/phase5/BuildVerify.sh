@@ -38,14 +38,33 @@ BUILD_AGENT="${SCRIPT_DIR}/BuildAgent.sh"
 TEST_AGENT="${SCRIPT_DIR}/testAgent.sh"
 LETTA_MEMORY="${SCRIPT_DIR}/lib/letta_memory.py"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m' # No Color
+# Library directory
+LIB_DIR="${SCRIPT_DIR}/lib"
+FOUNDATION_LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
+
+# Load Foundation helpers
+HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+if [ -f "$HELPERS_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
+fi
+
+# Colors for output (fallback if helpers not loaded)
+RED="${RED:-\033[0;31m}"
+GREEN="${GREEN:-\033[0;32m}"
+YELLOW="${YELLOW:-\033[1;33m}"
+BLUE="${BLUE:-\033[0;34m}"
+CYAN="${CYAN:-\033[0;36m}"
+MAGENTA="${MAGENTA:-\033[0;35m}"
+NC="${NC:-\033[0m}" # No Color
+
+# Source session library
+source "${LIB_DIR}/session_store.sh"
 
 # Configuration variables
 PROJECT_PATH=""
@@ -61,6 +80,12 @@ DRY_RUN="false"
 MAX_BUILD_ATTEMPTS="${MAX_BUILD_ATTEMPTS:-5}"
 MAX_TEST_ATTEMPTS="${MAX_TEST_ATTEMPTS:-3}"
 ARTIFACTS_DIR=""
+
+# Session integration
+USE_SESSION="${USE_SESSION:-false}"
+SESSION_SCHEME=""
+SESSION_PLATFORM=""
+SESSION_SIMULATOR=""
 
 # Session tracking
 SESSION_ID=""
@@ -138,6 +163,11 @@ OUTPUT OPTIONS:
     --artifacts-dir <path>  Output directory for artifacts
     --verbose               Enable verbose logging
     --dry-run               Show what would be done without executing
+
+SESSION OPTIONS:
+    --session               Use session defaults for configuration
+    --session-set <k=v>     Set session default (scheme, platform, simulator)
+
     --help                  Show this help message
 
 MEMORY INTEGRATION:
@@ -240,6 +270,17 @@ parse_args() {
                 DRY_RUN="true"
                 shift
                 ;;
+            --session)
+                USE_SESSION="true"
+                shift
+                ;;
+            --session-set)
+                local kv="${2:-}"
+                local key=$(echo "$kv" | cut -d'=' -f1)
+                local value=$(echo "$kv" | cut -d'=' -f2-)
+                session_set_default "$key" "$value"
+                shift 2
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -275,6 +316,28 @@ validate_dependencies() {
         log_warning "letta_memory.py not found: $LETTA_MEMORY"
         log_info "Memory integration will be disabled"
         SKIP_MEMORY="true"
+    fi
+
+    return 0
+}
+
+validate_input() {
+    # Require either prompt or plan file
+    if [ -z "$PROMPT" ] && [ -z "$PLAN_FILE" ]; then
+        log_error "No input provided. Use --prompt or --plan to specify the build task."
+        echo "" >&2
+        log_info "Examples:"
+        log_info "  buildVerify --prompt 'Build the project'"
+        log_info "  buildVerify --plan path/to/plan.md"
+        echo "" >&2
+        log_info "Run 'buildVerify --help' for more options."
+        return 1
+    fi
+
+    # Validate plan file exists if specified
+    if [ -n "$PLAN_FILE" ] && [ ! -f "$PLAN_FILE" ]; then
+        log_error "Plan file not found: $PLAN_FILE"
+        return 1
     fi
 
     return 0
@@ -414,7 +477,7 @@ EOF
     build_args+=("--ai-provider" "$AI_PROVIDER")
     build_args+=("--max-attempts" "$MAX_BUILD_ATTEMPTS")
 
-    [ -n "$PROMPT" ] && build_args+=("--prompt" "$PROMPT")
+    [ -n "$PROMPT" ] && build_args+=("--prompt-string" "$PROMPT")
     [ -n "$PLAN_FILE" ] && build_args+=("--plans-dir" "$(dirname "$PLAN_FILE")")
     [ -n "$PROJECT_PATH" ] && build_args+=("--project" "$PROJECT_PATH")
     [ -n "$SCHEME" ] && build_args+=("--scheme" "$SCHEME")
@@ -574,8 +637,25 @@ main() {
         exit 11
     fi
 
+    # Validate input
+    if ! validate_input; then
+        exit 11
+    fi
+
     # Initialize Letta memory
     init_letta_memory
+
+    # Load session defaults if enabled
+    if [ "$USE_SESSION" = "true" ]; then
+        session_load || true
+        SESSION_SCHEME=$(session_get_default "scheme")
+        SESSION_PLATFORM=$(session_get_default "platform")
+        SESSION_SIMULATOR=$(session_get_default "simulator")
+
+        # Apply defaults if not explicitly set
+        [ -z "$SCHEME" ] && [ -n "$SESSION_SCHEME" ] && SCHEME="$SESSION_SCHEME"
+        # Additional session defaults can be applied here
+    fi
 
     # Show configuration
     log_info "Session: $SESSION_ID"
@@ -586,6 +666,7 @@ main() {
     [ "$YOLO_MODE" = "true" ] && log_info "YOLO Mode: enabled"
     [ "$SKIP_TESTS" = "true" ] && log_info "Tests: skipped"
     [ "$LETTA_ENABLED" = "true" ] && log_info "Memory: enabled ($LETTA_AGENT)"
+    [ "$USE_SESSION" = "true" ] && log_info "Session Defaults: enabled"
     echo "" >&2
 
     # Run build phase
@@ -608,6 +689,11 @@ main() {
 
     # Store session summary
     store_session_summary
+
+    # Save session defaults if used
+    if [ "$USE_SESSION" = "true" ]; then
+        session_save || true
+    fi
 
     # Final report
     log_section "=========================================="

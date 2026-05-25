@@ -1,9 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Cleanup Plans Structure to Match Constitution
 # Removes non-constitutional files and enforces naming standards
 
 set -e
+
+# Verify bash is running
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This library requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 PLANS_DIR="${1:-${PROJECT_ROOT}/Plans}"

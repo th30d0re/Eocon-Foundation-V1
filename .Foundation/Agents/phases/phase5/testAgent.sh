@@ -33,6 +33,19 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/lib"
+FOUNDATION_LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
+
+# Load Foundation helpers and check shell compatibility
+HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+if [ -f "$HELPERS_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
+fi
 
 # Source utility libraries
 # shellcheck disable=SC1091
@@ -60,6 +73,16 @@ REPORT_DIR=""
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-./Artifacts}"
 VERBOSE="${VERBOSE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+
+# Simulator preparation
+PREPARE_SIMULATOR="${PREPARE_SIMULATOR:-false}"
+SIMULATOR_NAME=""
+GPS_LOCATION=""
+GPS_LAT=""
+GPS_LON=""
+APPEARANCE_MODE=""
+CAPTURE_PIPELINE_LOGS="${CAPTURE_PIPELINE_LOGS:-false}"
+PIPELINE_LOG_SESSION=""
 
 # Skip flags
 SKIP_UNIT="${SKIP_UNIT:-false}"
@@ -116,6 +139,14 @@ OPTIONS:
     --skip-run              Skip test execution
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
+
+  SIMULATOR PREPARATION:
+    --prepare-simulator     Boot and configure simulator before pipeline
+    --simulator-name <name> Simulator to use
+    --set-location <lat,lon> Set GPS location
+    --appearance <mode>     Set dark/light mode
+    --capture-pipeline-logs Unified log session for entire pipeline
+
     --help                  Show this help message
 
 PIPELINE STAGES:
@@ -309,6 +340,28 @@ parse_arguments() {
                 DRY_RUN="true"
                 shift 1
                 ;;
+            --prepare-simulator)
+                PREPARE_SIMULATOR="true"
+                shift 1
+                ;;
+            --simulator-name)
+                SIMULATOR_NAME="${2:-}"
+                shift 2
+                ;;
+            --set-location)
+                GPS_LOCATION="${2:-}"
+                GPS_LAT=$(echo "$GPS_LOCATION" | cut -d',' -f1)
+                GPS_LON=$(echo "$GPS_LOCATION" | cut -d',' -f2)
+                shift 2
+                ;;
+            --appearance)
+                APPEARANCE_MODE="${2:-}"
+                shift 2
+                ;;
+            --capture-pipeline-logs)
+                CAPTURE_PIPELINE_LOGS="true"
+                shift 1
+                ;;
             --help|-h)
                 show_usage
                 exit 0
@@ -445,6 +498,81 @@ should_run_stage() {
         run) [ "$SKIP_RUN" = "true" ] && return 1 ;;
     esac
 
+    return 0
+}
+
+# Prepare simulator for test pipeline
+prepare_simulator_for_pipeline() {
+    if [ "$PREPARE_SIMULATOR" != "true" ]; then
+        return 0
+    fi
+
+    if [ -z "$SIMULATOR_NAME" ]; then
+        log_warning "No simulator specified, skipping preparation"
+        return 0
+    fi
+
+    log_section "Preparing simulator: $SIMULATOR_NAME"
+
+    # Source simulator library
+    source "${LIB_DIR}/simulator.sh"
+
+    # Get simulator UUID
+    local simulator_udid
+    simulator_udid=$(get_simulator_by_name "$SIMULATOR_NAME") || {
+        log_error "Failed to resolve simulator: $SIMULATOR_NAME"
+        return 1
+    }
+
+    # Boot if not running
+    if [ "$(is_simulator_booted "$simulator_udid")" != "true" ]; then
+        log_info "Booting simulator..."
+        boot_simulator "$SIMULATOR_NAME" true > /dev/null || {
+            log_error "Failed to boot simulator"
+            return 1
+        }
+    else
+        log_info "Simulator already booted"
+    fi
+
+    # Configure GPS location
+    if [ -n "$GPS_LAT" ] && [ -n "$GPS_LON" ]; then
+        log_info "Setting GPS location: $GPS_LAT, $GPS_LON"
+        set_simulator_location "$simulator_udid" "$GPS_LAT" "$GPS_LON" > /dev/null || {
+            log_warning "Failed to set GPS location"
+        }
+    fi
+
+    # Configure appearance
+    if [ -n "$APPEARANCE_MODE" ]; then
+        log_info "Setting appearance: $APPEARANCE_MODE"
+        set_simulator_appearance "$simulator_udid" "$APPEARANCE_MODE" > /dev/null || {
+            log_warning "Failed to set appearance"
+        }
+    fi
+
+    log_success "Simulator prepared successfully"
+    return 0
+}
+
+# Start pipeline-wide log capture
+start_pipeline_log_capture() {
+    if [ "$CAPTURE_PIPELINE_LOGS" != "true" ]; then
+        return 0
+    fi
+
+    source "${LIB_DIR}/log_capture.sh"
+
+    log_info "Starting pipeline log capture..."
+    PIPELINE_LOG_SESSION=$(start_log_capture "Pipeline" "test" "${SCHEME:-TestPipeline}") || {
+        log_warning "Failed to start pipeline log capture"
+        return 1
+    }
+
+    # Register cleanup trap
+    trap 'stop_log_capture "$PIPELINE_LOG_SESSION" 2>/dev/null || true' EXIT
+
+    log_info "Pipeline logs: $(get_log_path "$PIPELINE_LOG_SESSION")"
     return 0
 }
 
@@ -817,6 +945,15 @@ main() {
     parse_arguments "$@"
     initialize
 
+    # Prepare simulator if requested
+    if ! prepare_simulator_for_pipeline; then
+        log_error "Simulator preparation failed"
+        exit 11
+    fi
+
+    # Start pipeline log capture
+    start_pipeline_log_capture
+
     # Retrieve build context from Letta memory if available
     retrieve_build_context
 
@@ -872,6 +1009,12 @@ main() {
     log_info "Total Duration: ${pipeline_duration}s"
     log_info "Artifacts: ${ARTIFACTS_RUN_DIR}"
     log_info "Report: ${ARTIFACTS_RUN_DIR}/pipeline_report.html"
+
+    # Stop pipeline log capture
+    if [ "$CAPTURE_PIPELINE_LOGS" = "true" ] && [ -n "$PIPELINE_LOG_SESSION" ]; then
+        log_info "Stopping pipeline log capture..."
+        stop_log_capture "$PIPELINE_LOG_SESSION" 2>/dev/null || true
+    fi
 
     exit $exit_code
 }

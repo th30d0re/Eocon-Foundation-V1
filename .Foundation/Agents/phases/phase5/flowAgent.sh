@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Flow Agent
 # Analyzes SwiftUI navigation structure and generates flow definitions
@@ -18,12 +18,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/lib"
+FOUNDATION_LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
+
+# Load Foundation helpers and check shell compatibility
+HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+if [ -f "$HELPERS_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
+fi
 
 # Source utility libraries
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testUtils.sh"
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testContextPaths.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/session_store.sh"
 
 # Set log prefix for this agent
 LOG_PREFIX="[FLOW]"
@@ -37,6 +52,10 @@ AI_PROVIDER="${AI_PROVIDER:-cursor}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-./Artifacts}"
 VERBOSE="${VERBOSE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+
+# Session integration
+USE_SESSION="${USE_SESSION:-false}"
+SESSION_SCHEME=""
 
 # State variables
 FLOWS_DETECTED=0
@@ -68,6 +87,8 @@ OPTIONS:
     --artifacts-dir <path>  Output directory for artifacts
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
+    --session               Use session defaults for configuration
+    --session-set <k=v>     Set session default (scheme, platform, simulator)
     --help                  Show this help message
 
 FLOW TYPES:
@@ -158,6 +179,17 @@ parse_arguments() {
                 DRY_RUN="true"
                 shift 1
                 ;;
+            --session)
+                USE_SESSION="true"
+                shift 1
+                ;;
+            --session-set)
+                local kv="${2:-}"
+                local key=$(echo "$kv" | cut -d'=' -f1)
+                local value=$(echo "$kv" | cut -d'=' -f2-)
+                session_set_default "$key" "$value"
+                shift 2
+                ;;
             --help|-h)
                 show_usage
                 exit 0
@@ -176,6 +208,14 @@ initialize() {
     log_section "Flow Agent Starting"
     log_section "════════════════════════════════════════"
     echo "" >&2
+
+    # Load session defaults if enabled
+    if [ "$USE_SESSION" = "true" ]; then
+        session_load || true
+        SESSION_SCHEME=$(session_get_default "scheme")
+        # Apply defaults if not explicitly set
+        # Note: flowAgent doesn't use scheme directly, but storing for consistency
+    fi
 
     # Setup directories
     setup_logs_dir "$ARTIFACTS_DIR" || {
@@ -544,6 +584,11 @@ main() {
 
     # Generate report
     generate_flow_report
+
+    # Save session defaults if used
+    if [ "$USE_SESSION" = "true" ]; then
+        session_save || true
+    fi
 
     # Final status
     echo "" >&2

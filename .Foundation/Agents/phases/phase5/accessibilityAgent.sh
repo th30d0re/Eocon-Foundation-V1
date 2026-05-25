@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Accessibility Agent
 # Analyzes and enhances SwiftUI views with accessibility modifiers
@@ -18,12 +18,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/lib"
+FOUNDATION_LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
+
+# Load Foundation helpers and check shell compatibility
+HELPERS_LIB="${FOUNDATION_LIB_DIR}/helpers.sh"
+if [ -f "$HELPERS_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$HELPERS_LIB"
+
+    # Check shell compatibility
+    if type check_shell_compatibility &>/dev/null; then
+        check_shell_compatibility || exit 11
+    fi
+fi
 
 # Source utility libraries
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testUtils.sh"
 # shellcheck disable=SC1091
 source "${LIB_DIR}/testContextPaths.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/simulator_prepare.sh"
 
 # Set log prefix for this agent
 LOG_PREFIX="[ACCESSIBILITY]"
@@ -41,6 +56,16 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-./Artifacts}"
 VERBOSE="${VERBOSE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+
+# AXe live validation variables
+USE_AXE="${USE_AXE:-false}"
+VALIDATE_LIVE="${VALIDATE_LIVE:-false}"
+AXE_AUDIT="${AXE_AUDIT:-false}"
+CHECK_TOUCH_TARGETS="${CHECK_TOUCH_TARGETS:-false}"
+SIMULATOR_NAME=""
+APP_PATH=""
+BUNDLE_ID=""
+SIMULATOR_UDID=""
 
 # State variables
 VIEWS_SCANNED=0
@@ -77,6 +102,16 @@ OPTIONS:
     --artifacts-dir <path>  Output directory for artifacts
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
+
+  AXE INTEGRATION:
+    --use-axe               Enable AXe UI automation
+    --validate-live         Compare code accessibility vs running app
+    --axe-audit             Generate audit from live hierarchy
+    --check-touch-targets   Verify 44x44pt minimum sizes
+    --simulator-name <name> Simulator to use
+    --app-path <path>       Path to .app bundle
+    --bundle-id <id>        App bundle identifier
+
     --help                  Show this help message
 
 ACCESSIBILITY MODIFIERS ADDED:
@@ -170,6 +205,36 @@ parse_arguments() {
                 ;;
             --dry-run)
                 DRY_RUN="true"
+                shift 1
+                ;;
+            --use-axe)
+                USE_AXE="true"
+                shift 1
+                ;;
+            --validate-live)
+                VALIDATE_LIVE="true"
+                USE_AXE="true"
+                shift 1
+                ;;
+            --axe-audit)
+                AXE_AUDIT="true"
+                USE_AXE="true"
+                shift 1
+                ;;
+            --simulator-name)
+                SIMULATOR_NAME="${2:-}"
+                shift 2
+                ;;
+            --app-path)
+                APP_PATH="${2:-}"
+                shift 2
+                ;;
+            --bundle-id)
+                BUNDLE_ID="${2:-}"
+                shift 2
+                ;;
+            --check-touch-targets)
+                CHECK_TOUCH_TARGETS="true"
                 shift 1
                 ;;
             --help|-h)
@@ -326,6 +391,123 @@ Has Traits: $has_traits"
     VIEWS_SCANNED=$((VIEWS_SCANNED + 1))
 
     echo "$analysis"
+}
+
+# Validate accessibility against live UI
+validate_live_accessibility() {
+    local file="$1"
+
+    if [ "$VALIDATE_LIVE" != "true" ] || [ "$USE_AXE" != "true" ]; then
+        return 0
+    fi
+
+    if ! command -v is_axe_available &>/dev/null || ! is_axe_available; then
+        log_warning "AXe not available, skipping live validation"
+        return 0
+    fi
+
+    # Prepare simulator if needed
+    if [ -z "$SIMULATOR_UDID" ]; then
+        log_info "Preparing simulator for live validation..."
+        SIMULATOR_UDID=$(prepare_simulator_for_testing "$SIMULATOR_NAME" "$APP_PATH" "$BUNDLE_ID") || {
+            log_error "Failed to prepare simulator"
+            return 1
+        }
+    fi
+
+    # Get live UI hierarchy
+    local ui_hierarchy
+    ui_hierarchy=$(JSON_OUTPUT=false axe_describe_ui "$SIMULATOR_UDID") || {
+        log_error "Failed to get UI hierarchy"
+        return 1
+    }
+
+    # Extract identifiers from code
+    local code_identifiers
+    code_identifiers=$(grep -oE 'accessibilityIdentifier\("[^"]+"\)' "$file" | sed 's/accessibilityIdentifier("\(.*\)")/\1/g' | sort -u)
+
+    # Compare with live UI
+    local missing_count=0
+    local found_count=0
+    while IFS= read -r identifier; do
+        if [ -z "$identifier" ]; then
+            continue
+        fi
+
+        if echo "$ui_hierarchy" | jq -e --arg id "$identifier" '.. | objects | select(.identifier == $id)' >/dev/null 2>&1; then
+            found_count=$((found_count + 1))
+        else
+            log_warning "Identifier in code but not in live UI: $identifier"
+            missing_count=$((missing_count + 1))
+        fi
+    done <<< "$code_identifiers"
+
+    log_info "Live validation: $found_count found, $missing_count missing"
+    return 0
+}
+
+# Run AXe-based accessibility audit
+run_axe_audit() {
+    if [ "$AXE_AUDIT" != "true" ] || [ "$USE_AXE" != "true" ]; then
+        return 0
+    fi
+
+    if ! command -v is_axe_available &>/dev/null || ! is_axe_available; then
+        log_warning "AXe not available, skipping audit"
+        return 0
+    fi
+
+    log_section "Running AXe Accessibility Audit"
+
+    # Prepare simulator if needed
+    if [ -z "$SIMULATOR_UDID" ]; then
+        log_info "Preparing simulator for audit..."
+        SIMULATOR_UDID=$(prepare_simulator_for_testing "$SIMULATOR_NAME" "$APP_PATH" "$BUNDLE_ID") || {
+            log_error "Failed to prepare simulator"
+            return 1
+        }
+    fi
+
+    # Get live UI hierarchy
+    local ui_hierarchy
+    ui_hierarchy=$(JSON_OUTPUT=false axe_describe_ui "$SIMULATOR_UDID") || {
+        log_error "Failed to get UI hierarchy for audit"
+        return 1
+    }
+
+    # Save audit hierarchy
+    local audit_file="${ARTIFACTS_DIR}/axe_audit_hierarchy.json"
+    echo "$ui_hierarchy" > "$audit_file"
+    log_info "UI hierarchy saved: $audit_file"
+
+    # Check touch targets if requested
+    if [ "$CHECK_TOUCH_TARGETS" = "true" ]; then
+        log_info "Checking touch target sizes (minimum 44x44pt)..."
+        local violations=0
+
+        # Parse UI hierarchy for elements with frames smaller than 44x44
+        if command -v jq >/dev/null 2>&1; then
+            violations=$(echo "$ui_hierarchy" | jq -r '
+                .. | objects | select(.frame?) |
+                select((.frame.width < 44) or (.frame.height < 44)) |
+                .identifier // .label // "unknown"
+            ' 2>/dev/null | wc -l | tr -d ' ')
+
+            if [ "$violations" -gt 0 ]; then
+                log_warning "Found $violations elements with touch targets smaller than 44x44pt"
+                echo "$ui_hierarchy" | jq -r '
+                    .. | objects | select(.frame?) |
+                    select((.frame.width < 44) or (.frame.height < 44)) |
+                    "  - \(.identifier // .label // "unknown"): \(.frame.width)x\(.frame.height)pt"
+                ' 2>/dev/null | head -10
+            else
+                log_success "All interactive elements meet 44x44pt minimum"
+            fi
+        fi
+    fi
+
+    log_success "AXe audit complete"
+    return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -510,6 +692,19 @@ generate_audit_report() {
         missing_list+="<li>$item</li>\n"
     done
 
+    # Add AXe audit section if available
+    local axe_section=""
+    if [ -f "${ARTIFACTS_DIR}/axe_audit_hierarchy.json" ]; then
+        axe_section="
+    <div class='section'>
+        <h2>AXe Live Audit</h2>
+        <p>UI hierarchy captured from running app:</p>
+        <ul>
+            <li><a href='axe_audit_hierarchy.json'>UI Hierarchy JSON</a></li>
+        </ul>
+    </div>"
+    fi
+
     local report_data="<div class='section'>
         <h2>Accessibility Audit Results</h2>
         <table>
@@ -528,6 +723,8 @@ generate_audit_report() {
         </ul>
     </div>
 
+    $axe_section
+
     <div class='section'>
         <h2>Recommendations</h2>
         <ul>
@@ -545,11 +742,17 @@ generate_audit_report() {
         --data "$report_data"
 
     # Generate JSON report
+    local axe_audit_data="false"
+    if [ -f "${ARTIFACTS_DIR}/axe_audit_hierarchy.json" ]; then
+        axe_audit_data="true"
+    fi
+
     local json_data="{
         \"viewsScanned\": $VIEWS_SCANNED,
         \"viewsModified\": $VIEWS_MODIFIED,
         \"identifiersAdded\": $IDENTIFIERS_ADDED,
-        \"issueCount\": ${#MISSING_ACCESSIBILITY[@]}
+        \"issueCount\": ${#MISSING_ACCESSIBILITY[@]},
+        \"axeAuditPerformed\": $axe_audit_data
     }"
 
     generate_report \
@@ -588,6 +791,11 @@ main() {
         # Analyze accessibility
         analyze_view_accessibility "$file"
 
+        # Validate against live UI if enabled
+        if [ "$USE_AXE" = "true" ]; then
+            validate_live_accessibility "$file"
+        fi
+
         # Enhance if not scan-only
         if [ "$SCAN_ONLY" = "false" ]; then
             if ! enhance_accessibility "$file"; then
@@ -596,6 +804,11 @@ main() {
             fi
         fi
     done <<< "$view_files"
+
+    # Run AXe audit if requested
+    if [ "$AXE_AUDIT" = "true" ]; then
+        run_axe_audit
+    fi
 
     # Generate audit report if requested
     if [ "$AUDIT_MODE" = "true" ] || [ "$SCAN_ONLY" = "true" ]; then

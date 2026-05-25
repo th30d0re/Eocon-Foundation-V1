@@ -1,9 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # AI Provider Abstraction Layer
 # Supports Cursor CLI, OpenAI, Anthropic, Google Gemini, and DeepSeek APIs.
 
 set -euo pipefail
+
+# Verify bash is running
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Error: This library requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${LIB_DIR}/.." && pwd)"
@@ -19,7 +25,7 @@ if [ "$AI_ENV_LOADED" -eq 0 ]; then
     export AI_ENV_LOADED=1
 fi
 
-AI_PROVIDER_DEFAULT="${AI_PROVIDER:-cursor}"
+AI_PROVIDER_DEFAULT="${AI_PROVIDER:-copilot}"
 AI_PROVIDER_DEFAULT="$(echo "$AI_PROVIDER_DEFAULT" | tr '[:upper:]' '[:lower:]')"
 
 AI_PROVIDER_READY=${AI_PROVIDER_READY:-0}

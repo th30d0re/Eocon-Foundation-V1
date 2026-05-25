@@ -2,6 +2,62 @@
 
 Phase 5 handles AI-powered code generation and build verification with automatic repair loops, multi-provider support, and intelligent auto-detection.
 
+## Shell Compatibility
+
+**All Phase 5 agents require bash 3.2 or later.** Bash 4.0+ is recommended for full compatibility.
+
+### Quick Check
+
+```bash
+# Check your bash version
+bash --version
+
+# macOS users: Install newer bash (recommended)
+brew install bash
+
+# Verify installation
+/usr/local/bin/bash --version
+```
+
+### macOS Users
+
+macOS ships with bash 3.2 (2007) due to licensing. While all agents work with bash 3.2, some features have limitations:
+
+- ✅ **Fully Compatible**: Core build/test functionality, basic arrays, parameter expansion
+- ⚠️ **Limited on bash 3.2**: Associative arrays, `readarray`/`mapfile` (requires bash 4.0+)
+- 💡 **Recommended**: Install bash 4.0+ via Homebrew for full feature support
+
+**Install newer bash on macOS:**
+
+```bash
+# Install via Homebrew
+brew install bash
+
+# Add to /etc/shells (for default shell, optional)
+echo "/usr/local/bin/bash" | sudo tee -a /etc/shells
+
+# Run agents with newer bash
+/usr/local/bin/bash BuildAgent.sh --help
+```
+
+### Troubleshooting
+
+**Error: "This script requires bash"**
+```bash
+# You're running in a different shell (zsh, sh, etc.)
+# Solution: Execute with bash explicitly
+bash BuildAgent.sh --plan plan.md
+```
+
+**Warning: "Running on bash 3.x"**
+```bash
+# Using macOS default bash (3.2) - agents work but with limitations
+# Solution: Install bash 4.0+ via Homebrew (optional)
+brew install bash
+```
+
+All agents use `#!/usr/bin/env bash` for maximum portability across environments. See [Shell Compatibility Guide](../../Docs/SHELL_COMPATIBILITY.md) for detailed information.
+
 ## Scripts
 
 | Script | Purpose |

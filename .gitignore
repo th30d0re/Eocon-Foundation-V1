@@ -73,3 +73,6 @@ Foundation/
 # Letta agent cache
 .letta/
 
+# Local session and tool config
+.foundation-session.json
+.gemini/
