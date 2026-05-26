@@ -158,6 +158,8 @@ BUILD_LINT_SCRIPT="${SCRIPT_DIR}/BuildLint.sh"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-${PROJECT_ROOT}/Artifacts}"
 LOGS_DIR=""
 STATUS_DIR=""
+ARTIFACTS_RUN_DIR=""  # Root of the per-run artifact directory (parent of logs/ and status/)
+BUILT_PRODUCTS_DIR_CAPTURED=""  # Populated after a successful build (read from built_products_dir.txt)
 
 # Input configuration
 PLAN_FILE=""
@@ -179,6 +181,7 @@ XCODE_PROJECT=""    # Auto-detected project path
 # Repair loop configuration
 MAX_REPAIR_ATTEMPTS="${MAX_REPAIR_ATTEMPTS:-3}"
 CURRENT_ATTEMPT=0
+REPAIR_FROM_ERRORS_FILE=""  # Path to argent errors JSON file (set by --repair-from-errors)
 
 # Session configuration (maintains context between attempts)
 SESSION_ID=""
@@ -1151,6 +1154,7 @@ setup_directories() {
 
     LOGS_DIR="${run_dir}/logs"
     STATUS_DIR="${run_dir}/status"
+    ARTIFACTS_RUN_DIR="${run_dir}"
 
     if ! mkdir -p "$LOGS_DIR"; then
         spinner_error "Setting up artifacts directory"
@@ -1173,6 +1177,7 @@ setup_directories() {
     log_verbose "Run directory: $run_dir"
     log_verbose "Logs directory: $LOGS_DIR"
     log_verbose "Status directory: $STATUS_DIR"
+    log_verbose "Artifacts run directory: $ARTIFACTS_RUN_DIR"
     log_verbose "Session ID: $SESSION_ID"
     log_verbose "AI CLI Command: $AI_CMD"
 }
@@ -1209,9 +1214,16 @@ validate_inputs() {
     start_spinner "Validating configuration"
 
     # Check if any input is provided - if not, run in lint-only mode
-    if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ] && [ -z "$PROMPT_CONTENT" ]; then
+    # REPAIR_FROM_ERRORS_FILE is AI-driven even though it carries no prompt text
+    if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ] && [ -z "$PROMPT_CONTENT" ] && [ -z "$REPAIR_FROM_ERRORS_FILE" ]; then
         LINT_ONLY_MODE="true"
         log_info "No AI input provided - running in auto-detect mode (build first, AI repair if needed)"
+    fi
+
+    # Explicitly force AI-driven mode for --repair-from-errors
+    if [ -n "$REPAIR_FROM_ERRORS_FILE" ]; then
+        LINT_ONLY_MODE="false"
+        log_verbose "Repair-from-errors mode: AI provider required"
     fi
 
     # Validate plan file if provided (skip if already cached)
@@ -1290,7 +1302,8 @@ validate_inputs() {
     if [ "$LINT_ONLY_MODE" = "false" ]; then
         if ! detect_ai_provider; then
             spinner_error "Validating configuration"
-            return 1
+            log_error "AI provider detection failed; no provider available for the requested operation"
+            return 11
         fi
     fi
 
@@ -3221,8 +3234,11 @@ run_multi_platform_build() {
         cat > "$build_script" << SCRIPT_EOF
 #!/bin/bash
 platform="\$1"
-result_file="$results_dir/\$(echo "\$platform" | tr ' ' '_').json"
-log_file="$results_dir/\$(echo "\$platform" | tr ' ' '_').log"
+plat_safe="\$(echo "\$platform" | tr ' ' '_')"
+result_file="$results_dir/\${plat_safe}.json"
+log_file="$results_dir/\${plat_safe}.log"
+plat_logs_dir="$results_dir/\${plat_safe}"
+mkdir -p "\$plat_logs_dir"
 
 # Construct destination from platform name
 case "\$platform" in
@@ -3246,7 +3262,7 @@ case "\$platform" in
         ;;
 esac
 
-"$BUILD_LINT_SCRIPT" $common_args --destination "\$dest" --logs-dir "$results_dir" > "\$log_file" 2>&1
+"$BUILD_LINT_SCRIPT" $common_args --destination "\$dest" --logs-dir "\$plat_logs_dir" > "\$log_file" 2>&1
 exit_code=\$?
 
 # Write result JSON
@@ -3306,6 +3322,8 @@ SCRIPT_EOF
 
             local plat_log="${results_dir}/$(echo "$plat" | tr ' ' '_').log"
             local plat_result="${results_dir}/$(echo "$plat" | tr ' ' '_').json"
+            local plat_logs_dir="${results_dir}/$(echo "$plat" | tr ' ' '_')"
+            mkdir -p "$plat_logs_dir"
 
             # Construct destination
             local dest=""
@@ -3330,7 +3348,7 @@ SCRIPT_EOF
                     ;;
             esac
 
-            local lint_args=("--logs-dir" "$results_dir" "--destination" "$dest" "--json-output")
+            local lint_args=("--logs-dir" "$plat_logs_dir" "--destination" "$dest" "--json-output")
             [ -n "${XCODE_WORKSPACE:-}" ] && lint_args+=("--workspace" "$XCODE_WORKSPACE")
             [ -n "${XCODE_PROJECT:-}" ] && [ -z "${XCODE_WORKSPACE:-}" ] && lint_args+=("--project" "$XCODE_PROJECT")
             [ -n "$SCHEME" ] && lint_args+=("--scheme" "$SCHEME")
@@ -3414,6 +3432,20 @@ run_build_lint() {
     if [ ${#DETECTED_PLATFORMS[@]} -gt 1 ] && [ -z "$PLATFORM" ] && [ -z "$DESTINATION" ] && [ -z "$TARGET_ID" ]; then
         log_info "Multiple platforms detected, running multi-platform build..."
         if run_multi_platform_build; then
+            # Pick a canonical BUILT_PRODUCTS_DIR from multi-platform results.
+            # All BuildLint invocations share the same --logs-dir ($results_dir), so each
+            # platform writes to the flat built_products_dir.txt in that directory.
+            # For sequential builds the last successful platform wins (deterministic).
+            local mp_results_dir="${LOGS_DIR}/platform_results"
+            local mp_built_products_file="${mp_results_dir}/built_products_dir.txt"
+            BUILT_PRODUCTS_DIR_CAPTURED=""
+
+            if [ -f "$mp_built_products_file" ]; then
+                BUILT_PRODUCTS_DIR_CAPTURED=$(cat "$mp_built_products_file")
+                log_verbose "BUILT_PRODUCTS_DIR_CAPTURED (multi-platform): $BUILT_PRODUCTS_DIR_CAPTURED"
+            else
+                log_error "Multi-platform build succeeded but no built_products_dir.txt found in ${mp_results_dir}"
+            fi
             return 0
         else
             return 10
@@ -3509,6 +3541,12 @@ run_build_lint() {
     if [ $lint_exit_code -eq 0 ]; then
         echo -e "${GREEN}[DONE]${NC} $build_spinner_msg ${GREEN}✓${NC}" >&2
         log_success "Build verification passed"
+        # Read BUILT_PRODUCTS_DIR written by BuildLint.sh after successful build
+        local built_products_dir_file="${LOGS_DIR}/built_products_dir.txt"
+        if [ -f "$built_products_dir_file" ]; then
+            BUILT_PRODUCTS_DIR_CAPTURED=$(cat "$built_products_dir_file")
+            log_verbose "BUILT_PRODUCTS_DIR_CAPTURED: $BUILT_PRODUCTS_DIR_CAPTURED"
+        fi
         return 0
     else
         echo -e "${RED}[FAILED]${NC} $build_spinner_msg ${RED}✗${NC}" >&2
@@ -3549,6 +3587,15 @@ Artifacts:
 EOF
 
     log_success "Status written to: $status_file"
+
+    # Write build_output.txt with the .app path for downstream consumers (e.g. test runners)
+    if [ -n "$BUILT_PRODUCTS_DIR_CAPTURED" ] && [ -n "$SCHEME" ]; then
+        local app_path="${BUILT_PRODUCTS_DIR_CAPTURED}/${SCHEME}.app"
+        echo "$app_path" > "${ARTIFACTS_RUN_DIR:-$STATUS_DIR}/build_output.txt"
+        log_success "build_output.txt written: $app_path"
+    else
+        log_warning "build_output.txt not written: BUILT_PRODUCTS_DIR_CAPTURED or SCHEME is empty"
+    fi
 
     # Store success to Letta memory
     store_build_result "success"
@@ -3786,6 +3833,151 @@ $context"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Argent UI-Error Repair Loop (--repair-from-errors <file>)
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_repair_loop_with_argent_errors() {
+    local errors_file="$REPAIR_FROM_ERRORS_FILE"
+    local context
+    local error_feedback=""
+    local is_followup="false"
+
+    # Validate jq is available
+    if ! command -v jq &>/dev/null; then
+        log_error "jq is required for --repair-from-errors but was not found"
+        return 11
+    fi
+
+    # Ensure an AI provider was successfully detected; detect_ai_provider() is called
+    # via validate_inputs() when REPAIR_FROM_ERRORS_FILE is set, but guard here explicitly
+    # so the function never silently enters the loop with an empty AI_CMD.
+    if [ -z "$AI_CMD" ]; then
+        if ! detect_ai_provider; then
+            log_error "--repair-from-errors requires a configured AI provider; none available (exit 11)"
+            return 11
+        fi
+    fi
+
+    # Validate and parse the errors JSON file
+    if ! jq empty "$errors_file" 2>/dev/null; then
+        log_error "Invalid JSON in errors file: $errors_file"
+        return 11
+    fi
+
+    local error_count
+    error_count=$(jq '.errors | length' "$errors_file" 2>/dev/null || echo "0")
+    if [ "$error_count" -eq 0 ]; then
+        log_warning "No errors found in $errors_file — nothing to repair"
+        return 0
+    fi
+
+    local source_name
+    source_name=$(jq -r '.source // "unknown"' "$errors_file")
+    local timestamp
+    timestamp=$(jq -r '.timestamp // "unknown"' "$errors_file")
+
+    log_info "Argent error repair: $error_count error(s) from $source_name (recorded $timestamp)"
+
+    context=$(gather_context)
+    retrieve_memory_context
+
+    log_info "Context length: ${#context} chars"
+    [ -n "$LETTA_MEMORY_CONTEXT" ] && log_info "Memory context: available"
+
+    while [ $CURRENT_ATTEMPT -lt $MAX_REPAIR_ATTEMPTS ]; do
+        CURRENT_ATTEMPT=$((CURRENT_ATTEMPT + 1))
+
+        echo "" >&2
+        log_section "────────────────────────────────────────"
+        log_attempt "Starting argent UI repair cycle"
+        log_section "────────────────────────────────────────"
+
+        # Build the UI-specific prompt from the parsed errors
+        local errors_block
+        errors_block=$(jq -r '
+          .errors[] |
+          "--- Error in flow: \(.flow // "unknown") | Step: \(.step // "?") | Action: \(.action // "?") ---\n" +
+          "Target element: \(.element // "?")\n" +
+          "Error: \(.error // "?")\n" +
+          "Screenshot path: \(.screenshot // "none")\n" +
+          "Element tree snapshot:\n\(.elementTree // "(not available)")\n"
+        ' "$errors_file" 2>/dev/null || echo "(could not parse errors)")
+
+        local prompt_content
+        if [ "$is_followup" = "false" ]; then
+            prompt_content="A UI test recorded the following failures. Each failure indicates an element could not be found or an action could not be performed. Fix the SwiftUI/UIKit source so that each element is present and reachable.
+
+For each missing element, the most common fix is to add \`.accessibilityIdentifier(\"<element>\")\` to the relevant view. For elements that exist but are not interactable, check the UI state (e.g. hidden, disabled, or covered by another view).
+
+$errors_block
+
+Project context:
+$context"
+        else
+            prompt_content="The previous fix attempt did not resolve all UI test failures. Here is the updated build feedback:
+
+$error_feedback
+
+The original UI test errors were:
+
+$errors_block
+
+Please re-examine the relevant views and ensure every listed element has the correct .accessibilityIdentifier and is visible/enabled in the expected state."
+        fi
+
+        # Acquire write lock before AI code generation
+        if ! acquire_write_access; then
+            log_error "Failed to acquire write lock"
+            update_session_context "$CURRENT_ATTEMPT" "queue_timeout" "Write lock timeout"
+            is_followup="true"
+            continue
+        fi
+
+        # Generate code with AI
+        if ! run_ai_cli "$prompt_content"; then
+            release_write_access
+            update_session_context "$CURRENT_ATTEMPT" "ai_error" "AI CLI failed"
+            log_error "AI CLI call failed"
+            is_followup="true"
+            continue
+        fi
+
+        release_write_access
+        update_session_context "$CURRENT_ATTEMPT" "ai_success" "AI code generated"
+
+        # Acquire build lock before verification
+        if ! acquire_build_access; then
+            log_error "Failed to acquire build lock"
+            update_session_context "$CURRENT_ATTEMPT" "queue_timeout" "Build lock timeout"
+            is_followup="true"
+            continue
+        fi
+
+        # Verify build
+        if run_build_lint; then
+            release_build_access
+            update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
+            write_success_status
+            return 0
+        fi
+
+        release_build_access
+
+        # Build still failing — get new errors for next iteration
+        error_feedback=$(get_error_feedback)
+        update_session_context "$CURRENT_ATTEMPT" "build_failed" "$error_feedback"
+
+        log_warning "Build still failing, will retry..."
+        is_followup="true"
+    done
+
+    # Exhausted all attempts
+    log_error "Maximum repair attempts ($MAX_REPAIR_ATTEMPTS) reached"
+    write_human_intervention
+    return 10
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Auto-Detect Mode (no plan provided - lint/build first, AI repair if needed)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3849,6 +4041,12 @@ run_lint_only() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 run_build_loop() {
+    # Handle argent UI-error repair mode
+    if [ -n "$REPAIR_FROM_ERRORS_FILE" ]; then
+        run_repair_loop_with_argent_errors
+        return $?
+    fi
+
     # Handle lint-only mode
     if [ "$LINT_ONLY_MODE" = "true" ]; then
         run_lint_only
@@ -4266,6 +4464,18 @@ main() {
                 fi
                 shift 2
                 exit 0
+                ;;
+            --repair-from-errors)
+                if [ -z "${2:-}" ]; then
+                    log_error "--repair-from-errors requires a file path argument"
+                    exit 11
+                fi
+                if [ ! -f "$2" ]; then
+                    log_error "--repair-from-errors: file not found: $2"
+                    exit 11
+                fi
+                REPAIR_FROM_ERRORS_FILE="$2"
+                shift 2
                 ;;
             --help|-h)
                 show_usage

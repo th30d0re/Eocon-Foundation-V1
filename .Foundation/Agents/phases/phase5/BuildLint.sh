@@ -100,6 +100,7 @@ SKIP_MACRO_VALIDATION="${SKIP_MACRO_VALIDATION:-true}"  # Default to true
 INCREMENTAL_BUILDS_ENABLED="${INCREMENTAL_BUILDS_ENABLED:-true}"
 JSON_OUTPUT="${JSON_OUTPUT:-false}"  # Output results in JSON format
 IS_SWIFT_PACKAGE="false"  # Set to true if building a Swift package
+BUILT_PRODUCTS_DIR_CAPTURED=""  # Populated after a successful build via -showBuildSettings
 
 # Load Phase 5 libraries for platform construction
 PHASE5_LIB_DIR="${SCRIPT_DIR}/lib"
@@ -900,6 +901,35 @@ run_xcode_build() {
         log_success "Build succeeded in ${duration}s with ${warnings_count} warning(s)"
     fi
     write_build_log "$build_output" "$duration" "$warnings_count"
+
+    # Capture BUILT_PRODUCTS_DIR via -showBuildSettings (fast metadata-only call, no recompile)
+    if [ -n "$LOGS_DIR" ]; then
+        local settings_cmd_array=("xcodebuild")
+        if [ -n "$XCODE_WORKSPACE" ]; then
+            settings_cmd_array+=("-workspace" "$XCODE_WORKSPACE")
+        elif [ -n "$XCODE_PROJECT" ]; then
+            settings_cmd_array+=("-project" "$XCODE_PROJECT")
+        fi
+        settings_cmd_array+=("-scheme" "$SCHEME")
+        settings_cmd_array+=("-configuration" "$BUILD_CONFIGURATION")
+        if [ -n "$DESTINATION" ]; then
+            settings_cmd_array+=("-destination" "$DESTINATION")
+        fi
+        if [ -n "$DERIVED_DATA_PATH" ]; then
+            settings_cmd_array+=("-derivedDataPath" "$DERIVED_DATA_PATH")
+        fi
+        settings_cmd_array+=("-showBuildSettings")
+
+        local built_products_dir
+        built_products_dir=$("${settings_cmd_array[@]}" 2>/dev/null | grep "^\s*BUILT_PRODUCTS_DIR" | awk '{print $3}' || true)
+        if [ -n "$built_products_dir" ]; then
+            BUILT_PRODUCTS_DIR_CAPTURED="$built_products_dir"
+            echo "$built_products_dir" > "${LOGS_DIR}/built_products_dir.txt"
+            log_verbose "BUILT_PRODUCTS_DIR captured: $built_products_dir"
+        else
+            log_warning "Could not capture BUILT_PRODUCTS_DIR from -showBuildSettings"
+        fi
+    fi
 
     return 0
 }
