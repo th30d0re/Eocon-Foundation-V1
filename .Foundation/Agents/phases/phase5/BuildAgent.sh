@@ -3433,18 +3433,35 @@ run_build_lint() {
         log_info "Multiple platforms detected, running multi-platform build..."
         if run_multi_platform_build; then
             # Pick a canonical BUILT_PRODUCTS_DIR from multi-platform results.
-            # All BuildLint invocations share the same --logs-dir ($results_dir), so each
-            # platform writes to the flat built_products_dir.txt in that directory.
-            # For sequential builds the last successful platform wins (deterministic).
+            # Each platform's BuildLint writes built_products_dir.txt into its own
+            # per-platform subdirectory (plat_logs_dir), e.g.:
+            #   platform_results/iOS_Simulator/built_products_dir.txt
+            # Priority: iOS Simulator > macOS > watchOS > tvOS > visionOS > any
             local mp_results_dir="${LOGS_DIR}/platform_results"
-            local mp_built_products_file="${mp_results_dir}/built_products_dir.txt"
             BUILT_PRODUCTS_DIR_CAPTURED=""
 
-            if [ -f "$mp_built_products_file" ]; then
-                BUILT_PRODUCTS_DIR_CAPTURED=$(cat "$mp_built_products_file")
-                log_verbose "BUILT_PRODUCTS_DIR_CAPTURED (multi-platform): $BUILT_PRODUCTS_DIR_CAPTURED"
-            else
-                log_error "Multi-platform build succeeded but no built_products_dir.txt found in ${mp_results_dir}"
+            for plat in "iOS Simulator" "macOS" "watchOS Simulator" "tvOS Simulator" "visionOS Simulator"; do
+                local plat_file="${mp_results_dir}/$(echo "$plat" | tr ' ' '_')/built_products_dir.txt"
+                if [ -f "$plat_file" ]; then
+                    BUILT_PRODUCTS_DIR_CAPTURED=$(cat "$plat_file")
+                    log_verbose "BUILT_PRODUCTS_DIR_CAPTURED (multi-platform, canonical: $plat): $BUILT_PRODUCTS_DIR_CAPTURED"
+                    break
+                fi
+            done
+
+            if [ -z "$BUILT_PRODUCTS_DIR_CAPTURED" ]; then
+                # Fallback: first available per-platform subdirectory
+                for f in "${mp_results_dir}"/*/built_products_dir.txt; do
+                    if [ -f "$f" ]; then
+                        BUILT_PRODUCTS_DIR_CAPTURED=$(cat "$f")
+                        log_verbose "BUILT_PRODUCTS_DIR_CAPTURED (multi-platform, fallback): $BUILT_PRODUCTS_DIR_CAPTURED"
+                        break
+                    fi
+                done
+            fi
+
+            if [ -z "$BUILT_PRODUCTS_DIR_CAPTURED" ]; then
+                log_error "Multi-platform build succeeded but no built_products_dir.txt found under ${mp_results_dir}/"
             fi
             return 0
         else

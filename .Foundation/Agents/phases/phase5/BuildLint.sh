@@ -921,7 +921,7 @@ run_xcode_build() {
         settings_cmd_array+=("-showBuildSettings")
 
         local built_products_dir
-        built_products_dir=$("${settings_cmd_array[@]}" 2>/dev/null | grep "^\s*BUILT_PRODUCTS_DIR" | awk '{print $3}' || true)
+        built_products_dir=$("${settings_cmd_array[@]}" 2>/dev/null | awk '/^[[:space:]]*BUILT_PRODUCTS_DIR[[:space:]]*=/{print $3; exit}' || true)
         if [ -n "$built_products_dir" ]; then
             BUILT_PRODUCTS_DIR_CAPTURED="$built_products_dir"
             echo "$built_products_dir" > "${LOGS_DIR}/built_products_dir.txt"
