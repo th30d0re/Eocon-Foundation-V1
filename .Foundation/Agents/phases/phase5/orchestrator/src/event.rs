@@ -73,6 +73,22 @@ fn map_key(key: KeyEvent) -> Action {
         KeyCode::Left => Action::InputCursorLeft,
         KeyCode::Right => Action::InputCursorRight,
 
+        // Scrolling
+        KeyCode::PageUp => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                Action::OutputScrollUp
+            } else {
+                Action::ScrollUp
+            }
+        }
+        KeyCode::PageDown => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                Action::OutputScrollDown
+            } else {
+                Action::ScrollDown
+            }
+        }
+
         // Everything else goes to the input bar
         KeyCode::Char(c) => Action::InputChar(c),
         _ => Action::Tick,

@@ -1,6 +1,7 @@
 pub mod action;
 pub mod agents;
 pub mod app;
+pub mod apply;
 pub mod chat;
 pub mod detect;
 pub mod event;
@@ -112,6 +113,7 @@ impl Config {
 #[derive(Debug, Clone, clap::Parser)]
 #[command(name = "orch")]
 #[command(about = "Rust TUI orchestrator for Foundation build pipeline")]
+#[command(version)]
 pub struct CliArgs {
     /// Run in mock mode with synthetic output (no subprocesses).
     #[arg(long)]
@@ -315,6 +317,8 @@ pub fn run(config: Config) -> Result<()> {
                     }
                 }
                 Some(SpawnRequest::Test) => {
+                    let stage = app.test_stage.as_deref().or(config.stage.as_deref());
+                    let resume_from = app.test_resume_from.as_deref();
                     let cmd = test_agent::test_agent_cmd(
                         &config.agents_dir,
                         app.project.as_deref(),
@@ -322,7 +326,8 @@ pub fn run(config: Config) -> Result<()> {
                         app.current_provider.as_deref(),
                         app.current_model.as_deref(),
                         config.simulator_name.as_deref(),
-                        config.stage.as_deref(),
+                        stage,
+                        resume_from,
                         config.verbose,
                         config.dry_run,
                     );

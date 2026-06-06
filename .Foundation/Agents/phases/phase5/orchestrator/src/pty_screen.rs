@@ -33,6 +33,10 @@ pub struct PtyScreen {
     fg: Option<Color>,
     bg: Option<Color>,
     bold: bool,
+    /// Lines that have scrolled off the top of the visible grid.
+    scrollback: Vec<Vec<Cell>>,
+    /// How many lines back from the bottom the view is scrolled (0 = at bottom).
+    scrollback_offset: usize,
 }
 
 impl PtyScreen {
@@ -49,6 +53,8 @@ impl PtyScreen {
             fg: None,
             bg: None,
             bold: false,
+            scrollback: Vec::new(),
+            scrollback_offset: 0,
         }
     }
 
@@ -58,10 +64,12 @@ impl PtyScreen {
     }
 
     /// Scroll the grid up by `count` rows, inserting blank rows at the bottom.
+    /// Removed lines are saved to the scrollback buffer.
     fn scroll_up_lines(&mut self, count: usize) {
         let count = count.min(self.rows);
         for _ in 0..count {
-            self.grid.remove(0);
+            let line = self.grid.remove(0);
+            self.scrollback.push(line);
             self.grid.push(vec![Cell::default(); self.cols]);
         }
     }
@@ -90,20 +98,40 @@ impl PtyScreen {
         self.parser = parser;
     }
 
-    /// Convert the virtual screen grid into ratatui Text for rendering.
+    /// Convert the virtual screen grid into ratatui Text for rendering,
+    /// accounting for scrollback offset.
     pub fn as_text(&self) -> Text<'_> {
-        let lines: Vec<Line> = self
-            .grid
-            .iter()
-            .map(|row| {
-                let spans: Vec<Span> = row
-                    .iter()
-                    .map(|cell| Span::styled(cell.ch.to_string(), cell.style))
-                    .collect();
-                Line::from(spans)
-            })
-            .collect();
+        let total = self.scrollback.len() + self.rows;
+        let offset = self.scrollback_offset.min(total.saturating_sub(self.rows));
+        let start = total.saturating_sub(self.rows + offset);
+        let end = total.saturating_sub(offset);
+
+        let mut lines = Vec::new();
+        for i in start..end {
+            if i < self.scrollback.len() {
+                lines.push(cells_to_line(&self.scrollback[i]));
+            } else {
+                lines.push(cells_to_line(&self.grid[i - self.scrollback.len()]));
+            }
+        }
+
         Text::from(lines)
+    }
+
+    /// Scroll the output view up by `count` lines (view older content).
+    pub fn scroll_up(&mut self, count: usize) {
+        let max = self.scrollback.len();
+        self.scrollback_offset = (self.scrollback_offset + count).min(max);
+    }
+
+    /// Scroll the output view down by `count` lines (view newer content).
+    pub fn scroll_down(&mut self, count: usize) {
+        self.scrollback_offset = self.scrollback_offset.saturating_sub(count);
+    }
+
+    /// Scroll to the bottom of the output (most recent content).
+    pub fn scroll_to_bottom(&mut self) {
+        self.scrollback_offset = 0;
     }
 
     fn update_style(&mut self) {
@@ -288,4 +316,12 @@ impl Perform for PtyScreen {
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _c: char) {}
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
+}
+
+fn cells_to_line(cells: &[Cell]) -> Line<'_> {
+    let spans: Vec<Span> = cells
+        .iter()
+        .map(|cell| Span::styled(cell.ch.to_string(), cell.style))
+        .collect();
+    Line::from(spans)
 }

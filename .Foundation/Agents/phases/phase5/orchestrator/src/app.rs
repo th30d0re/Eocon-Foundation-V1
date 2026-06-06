@@ -5,6 +5,7 @@ use std::time::Instant;
 use ratatui::style::Color;
 
 use crate::action::Action;
+use crate::apply::{apply_changes, PendingChange};
 use crate::chat::{build_system_prompt, ChatMessage, ChatRequest};
 use crate::mock;
 use crate::pty_screen::PtyScreen;
@@ -42,6 +43,13 @@ pub enum InfoView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyPhase {
+    Idle,
+    Prompting,
+    Building,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnRequest {
     Build,
     Test,
@@ -75,6 +83,8 @@ pub struct SlashCommand {
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "/build", description: "Start BuildAgent", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/test", description: "Start TestAgent", takes_arg: false, arg_hint: "" },
+    SlashCommand { name: "/test-from", description: "Start TestAgent from a specific stage", takes_arg: true, arg_hint: "<stage>" },
+    SlashCommand { name: "/test-stage", description: "Run a single TestAgent stage", takes_arg: true, arg_hint: "<stage>" },
     SlashCommand { name: "/provider", description: "Switch AI provider", takes_arg: true, arg_hint: "<provider>" },
     SlashCommand { name: "/model", description: "Switch AI model", takes_arg: true, arg_hint: "<model>" },
     SlashCommand { name: "/skip", description: "Skip current phase", takes_arg: false, arg_hint: "" },
@@ -83,6 +93,8 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "/metrics", description: "Show metrics view", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/artifacts", description: "Show artifacts view", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/help", description: "Show available commands", takes_arg: false, arg_hint: "" },
+    SlashCommand { name: "/apply", description: "Apply pending AI-suggested changes", takes_arg: false, arg_hint: "" },
+    SlashCommand { name: "/discard", description: "Discard pending AI-suggested changes", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/quit", description: "Exit orchestrator", takes_arg: false, arg_hint: "" },
 ];
 
@@ -103,6 +115,8 @@ pub struct App {
     pub agent_state: AgentState,
     pub error_count: u32,
     pub started: Instant,
+    /// When the current command (build/test) started, if any.
+    pub command_started: Option<Instant>,
     pub build_exit: Option<i32>,
     pub test_exit: Option<i32>,
     pub interaction: Vec<InteractionMessage>,
@@ -126,6 +140,10 @@ pub struct App {
     pub cwd: PathBuf,
     /// Set by /build or /test; drained by the main loop to perform actual spawns.
     pub spawn_request: Option<SpawnRequest>,
+    /// Override stage for the next TestAgent run (set by /test-stage).
+    pub test_stage: Option<String>,
+    /// Resume-from stage for the next TestAgent run (set by /test-from).
+    pub test_resume_from: Option<String>,
     /// A chat message typed without a leading slash, waiting to be sent to the active agent.
     pub pending_chat: Option<String>,
     // Command picker state
@@ -136,6 +154,12 @@ pub struct App {
     pub chat_messages: Vec<ChatMessage>,
     pub chat_request: Option<ChatRequest>,
     pub chat_rx: Option<Receiver<Result<String, String>>>,
+    /// Lines scrolled up in the interaction pane (0 = at bottom).
+    pub interaction_scroll: u16,
+    // Pending AI-suggested code changes
+    pub pending_changes: Vec<PendingChange>,
+    pub apply_phase: ApplyPhase,
+    pub apply_build_exit: Option<i32>,
 }
 
 /// Fun status messages shown on the info line (Claude Code style).
@@ -183,6 +207,7 @@ impl App {
             agent_state: AgentState::Idle,
             error_count: 0,
             started: Instant::now(),
+            command_started: None,
             build_exit: None,
             test_exit: None,
             interaction: Vec::new(),
@@ -204,6 +229,8 @@ impl App {
             artifacts_dir: None,
             cwd,
             spawn_request: None,
+            test_stage: None,
+            test_resume_from: None,
             pending_chat: None,
             picker_open: false,
             picker_selected: 0,
@@ -211,6 +238,10 @@ impl App {
             chat_messages: Vec::new(),
             chat_request: None,
             chat_rx: None,
+            interaction_scroll: 0,
+            pending_changes: Vec::new(),
+            apply_phase: ApplyPhase::Idle,
+            apply_build_exit: None,
         };
 
         if mock_mode {
@@ -318,6 +349,17 @@ impl App {
                     self.should_quit = true;
                 }
             }
+            Action::ApplyChanges => {
+                self.handle_apply_changes();
+            }
+            Action::DiscardChanges => {
+                self.pending_changes.clear();
+                self.apply_phase = ApplyPhase::Idle;
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Agent,
+                    text: "Changes discarded.".to_string(),
+                });
+            }
             Action::Resize(cols, rows) => {
                 let rows = rows as usize;
                 let cols = cols as usize;
@@ -350,6 +392,7 @@ impl App {
                     Phase::Build => {
                         self.build_exit = Some(code);
                         self.agent_state = AgentState::Idle;
+                        self.command_started = None;
                         if code == 0 {
                             self.interaction.push(InteractionMessage {
                                 voice: Voice::Agent,
@@ -373,6 +416,7 @@ impl App {
                     Phase::Test => {
                         self.test_exit = Some(code);
                         self.agent_state = AgentState::Idle;
+                        self.command_started = None;
                         if code == 0 {
                             self.phase = Phase::Complete;
                             self.interaction.push(InteractionMessage {
@@ -435,6 +479,8 @@ impl App {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
                 }
+                // Reset scroll when user submits input so they see the new content.
+                self.interaction_scroll = 0;
             }
             Action::PickerUp => {
                 if self.picker_open && self.picker_selected > 0 {
@@ -445,6 +491,18 @@ impl App {
                 if self.picker_open && self.picker_selected + 1 < self.picker_filtered.len() {
                     self.picker_selected += 1;
                 }
+            }
+            Action::ScrollUp => {
+                self.interaction_scroll += 5;
+            }
+            Action::ScrollDown => {
+                self.interaction_scroll = self.interaction_scroll.saturating_sub(5);
+            }
+            Action::OutputScrollUp => {
+                self.screen.scroll_up(5);
+            }
+            Action::OutputScrollDown => {
+                self.screen.scroll_down(5);
             }
         }
     }
@@ -463,11 +521,79 @@ impl App {
         }
     }
 
+    fn handle_apply_changes(&mut self) {
+        if self.pending_changes.is_empty() {
+            self.apply_phase = ApplyPhase::Idle;
+            return;
+        }
+
+        let paths: Vec<String> = self
+            .pending_changes
+            .iter()
+            .map(|c| c.path.display().to_string())
+            .collect();
+
+        match apply_changes(&self.pending_changes) {
+            Ok(count) => {
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Agent,
+                    text: format!("Applied {} change(s): {}", count, paths.join(", ")),
+                });
+                self.pending_changes.clear();
+
+                // Determine whether any applied file lives inside the orchestrator's
+                // own src/ directory. If so, we need to rebuild and restart.
+                let orch_dir = self.cwd.clone();
+                let src_dir = orch_dir.join("src");
+                let any_tui = paths.iter().any(|p| PathBuf::from(p).starts_with(&src_dir));
+
+                if any_tui {
+                    self.apply_phase = ApplyPhase::Building;
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: "Changes affect the TUI. Building orch...".to_string(),
+                    });
+                } else {
+                    self.apply_phase = ApplyPhase::Idle;
+                }
+            }
+            Err(e) => {
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Error,
+                    text: format!("Failed to apply changes: {}", e),
+                });
+                self.apply_phase = ApplyPhase::Idle;
+                self.pending_changes.clear();
+            }
+        }
+    }
+
     fn handle_command(&mut self, cmd: &str) {
         self.interaction.push(InteractionMessage {
             voice: Voice::User,
             text: format!("> {}", cmd),
         });
+
+        // If we're prompting for change approval, only a few commands are valid.
+        if self.apply_phase == ApplyPhase::Prompting {
+            match cmd.trim().to_lowercase().as_str() {
+                "y" | "yes" | "/yes" | "/y" | "/apply" => {
+                    self.update(Action::ApplyChanges);
+                    return;
+                }
+                "n" | "no" | "/no" | "/n" | "/discard" => {
+                    self.update(Action::DiscardChanges);
+                    return;
+                }
+                _ => {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Warning,
+                        text: "Please respond with y/yes/apply or n/no/discard.".to_string(),
+                    });
+                    return;
+                }
+            }
+        }
 
         // Parse as CLI-style flags first (--key value or --key=value)
         let mut parts = cmd.split_whitespace();
@@ -570,10 +696,30 @@ impl App {
             "/no" | "/n" => {
                 self.should_quit = true;
             }
+            "/apply" => {
+                if self.pending_changes.is_empty() {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Warning,
+                        text: "No pending changes to apply.".to_string(),
+                    });
+                } else {
+                    self.update(Action::ApplyChanges);
+                }
+            }
+            "/discard" => {
+                if self.pending_changes.is_empty() {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Warning,
+                        text: "No pending changes to discard.".to_string(),
+                    });
+                } else {
+                    self.update(Action::DiscardChanges);
+                }
+            }
             "/help" => {
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
-                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /skip           — skip current phase\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: moonshot, openai, codex, cursor, anthropic, google, ollama, openrouter".to_string(),
+                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: moonshot, openai, codex, cursor, anthropic, google, ollama, openrouter".to_string(),
                 });
             }
             "/artifacts" => {
@@ -618,6 +764,7 @@ impl App {
                     self.phase = Phase::Build;
                     self.agent_state = AgentState::Acting;
                     self.build_exit = None;
+                    self.command_started = Some(Instant::now());
                     self.interaction.push(InteractionMessage {
                         voice: Voice::Agent,
                         text: "Starting BuildAgent...".to_string(),
@@ -631,13 +778,66 @@ impl App {
                         text: "Already running. Use /skip to cancel.".to_string(),
                     });
                 } else {
+                    self.test_stage = None;
+                    self.test_resume_from = None;
+                    self.spawn_request = Some(SpawnRequest::Test);
+                    self.phase = Phase::Test;
+                    self.agent_state = AgentState::Acting;
+                    self.test_exit = None;
+                    self.command_started = Some(Instant::now());
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: "Starting TestAgent...".to_string(),
+                    });
+                }
+            }
+            "/test-from" => {
+                let stage = parts.next().unwrap_or("").to_string();
+                if stage.is_empty() {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: "Usage: /test-from <stage>".to_string(),
+                    });
+                } else if self.phase == Phase::Build || self.phase == Phase::Test {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: "Already running. Use /skip to cancel.".to_string(),
+                    });
+                } else {
+                    self.test_stage = None;
+                    self.test_resume_from = Some(stage.clone());
                     self.spawn_request = Some(SpawnRequest::Test);
                     self.phase = Phase::Test;
                     self.agent_state = AgentState::Acting;
                     self.test_exit = None;
                     self.interaction.push(InteractionMessage {
                         voice: Voice::Agent,
-                        text: "Starting TestAgent...".to_string(),
+                        text: format!("Starting TestAgent from stage '{}'...", stage),
+                    });
+                }
+            }
+            "/test-stage" => {
+                let stage = parts.next().unwrap_or("").to_string();
+                if stage.is_empty() {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: "Usage: /test-stage <stage>".to_string(),
+                    });
+                } else if self.phase == Phase::Build || self.phase == Phase::Test {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: "Already running. Use /skip to cancel.".to_string(),
+                    });
+                } else {
+                    self.test_stage = Some(stage.clone());
+                    self.test_resume_from = None;
+                    self.spawn_request = Some(SpawnRequest::Test);
+                    self.phase = Phase::Test;
+                    self.agent_state = AgentState::Acting;
+                    self.test_exit = None;
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Starting TestAgent stage '{}'...", stage),
                     });
                 }
             }
@@ -778,9 +978,21 @@ impl App {
             }
             "--stage" => {
                 if let Some(val) = parts.next() {
+                    self.test_stage = Some(val.to_string());
+                    self.test_resume_from = None;
                     self.interaction.push(InteractionMessage {
                         voice: Voice::Agent,
                         text: format!("Stage set to: {}", val),
+                    });
+                }
+            }
+            "--resume-from" => {
+                if let Some(val) = parts.next() {
+                    self.test_resume_from = Some(val.to_string());
+                    self.test_stage = None;
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Resume-from set to: {}", val),
                     });
                 }
             }

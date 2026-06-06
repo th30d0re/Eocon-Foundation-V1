@@ -6,6 +6,8 @@ pub enum Action {
     Abort,
     Quit,
     Confirm(bool),
+    ApplyChanges,
+    DiscardChanges,
     ToggleHelp,
     Tick,
     Resize(u16, u16),
@@ -21,4 +23,9 @@ pub enum Action {
     // Command picker navigation
     PickerUp,
     PickerDown,
+    // Scrolling
+    ScrollUp,
+    ScrollDown,
+    OutputScrollUp,
+    OutputScrollDown,
 }

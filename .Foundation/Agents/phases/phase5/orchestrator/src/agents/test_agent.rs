@@ -17,6 +17,7 @@ pub fn test_agent_cmd(
     model: Option<&str>,
     simulator_name: Option<&str>,
     stage: Option<&str>,
+    resume_from: Option<&str>,
     verbose: bool,
     dry_run: bool,
 ) -> AgentCmd {
@@ -44,6 +45,10 @@ pub fn test_agent_cmd(
     }
     if let Some(v) = stage {
         args.push("--stage".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = resume_from {
+        args.push("--resume-from".to_string());
         args.push(v.to_string());
     }
     if verbose {
