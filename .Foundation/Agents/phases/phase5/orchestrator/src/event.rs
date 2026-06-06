@@ -70,8 +70,20 @@ fn map_key(key: KeyEvent) -> Action {
         // Input bar editing
         KeyCode::Backspace => Action::InputBackspace,
         KeyCode::Enter => Action::InputSubmit,
-        KeyCode::Left => Action::InputCursorLeft,
-        KeyCode::Right => Action::InputCursorRight,
+        KeyCode::Left => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                Action::FocusLeft
+            } else {
+                Action::InputCursorLeft
+            }
+        }
+        KeyCode::Right => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                Action::FocusRight
+            } else {
+                Action::InputCursorRight
+            }
+        }
 
         // Scrolling
         KeyCode::PageUp => {

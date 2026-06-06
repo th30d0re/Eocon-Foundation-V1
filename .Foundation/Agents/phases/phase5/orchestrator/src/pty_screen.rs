@@ -37,6 +37,10 @@ pub struct PtyScreen {
     scrollback: Vec<Vec<Cell>>,
     /// How many lines back from the bottom the view is scrolled (0 = at bottom).
     scrollback_offset: usize,
+    /// Visible rows — may be smaller than `rows` so content isn't lost on shrink.
+    visible_rows: usize,
+    /// Visible cols — may be smaller than `cols` so content isn't lost on shrink.
+    visible_cols: usize,
 }
 
 impl PtyScreen {
@@ -55,12 +59,19 @@ impl PtyScreen {
             bold: false,
             scrollback: Vec::new(),
             scrollback_offset: 0,
+            visible_rows: rows,
+            visible_cols: cols,
         }
     }
 
-    /// Current `(rows, cols)` of the virtual screen.
+    /// Current buffer `(rows, cols)` of the virtual screen (may be larger than visible).
     pub fn dims(&self) -> (usize, usize) {
         (self.rows, self.cols)
+    }
+
+    /// Current visible `(rows, cols)` for rendering.
+    pub fn visible_dims(&self) -> (usize, usize) {
+        (self.visible_rows, self.visible_cols)
     }
 
     /// Scroll the grid up by `count` rows, inserting blank rows at the bottom.
@@ -74,20 +85,36 @@ impl PtyScreen {
         }
     }
 
-    /// Resize the virtual screen. When growing, content is preserved from the
-    /// old grid; when shrinking, content is truncated to the new dimensions.
+    /// Resize the virtual screen. The buffer only grows — never shrinks — so
+    /// content is preserved when the pane layout changes. The visible dimensions
+    /// are updated so rendering clips to the actual pane size.
     pub fn resize(&mut self, rows: usize, cols: usize) {
-        let mut new_grid = vec![vec![Cell::default(); cols]; rows];
-        for r in 0..rows.min(self.rows) {
-            for c in 0..cols.min(self.cols) {
+        // Update visible dimensions to match the actual pane size.
+        self.visible_rows = rows;
+        self.visible_cols = cols;
+
+        // Only grow the buffer; if the new size is smaller, keep the old buffer.
+        let buf_rows = rows.max(self.rows);
+        let buf_cols = cols.max(self.cols);
+
+        if buf_rows == self.rows && buf_cols == self.cols {
+            // No change to buffer size.
+            self.cursor_row = self.cursor_row.min(self.rows.saturating_sub(1));
+            self.cursor_col = self.cursor_col.min(self.cols.saturating_sub(1));
+            return;
+        }
+
+        let mut new_grid = vec![vec![Cell::default(); buf_cols]; buf_rows];
+        for r in 0..self.rows {
+            for c in 0..self.cols {
                 new_grid[r][c] = self.grid[r][c].clone();
             }
         }
         self.grid = new_grid;
-        self.rows = rows;
-        self.cols = cols;
-        self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
-        self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
+        self.rows = buf_rows;
+        self.cols = buf_cols;
+        self.cursor_row = self.cursor_row.min(self.rows.saturating_sub(1));
+        self.cursor_col = self.cursor_col.min(self.cols.saturating_sub(1));
     }
 
     /// Feed raw PTY bytes into the VTE parser.
@@ -99,19 +126,24 @@ impl PtyScreen {
     }
 
     /// Convert the virtual screen grid into ratatui Text for rendering,
-    /// accounting for scrollback offset.
+    /// accounting for scrollback offset and visible dimensions.
     pub fn as_text(&self) -> Text<'_> {
         let total = self.scrollback.len() + self.rows;
-        let offset = self.scrollback_offset.min(total.saturating_sub(self.rows));
-        let start = total.saturating_sub(self.rows + offset);
+        let offset = self.scrollback_offset.min(total.saturating_sub(self.visible_rows));
+        let start = total.saturating_sub(self.visible_rows + offset);
         let end = total.saturating_sub(offset);
 
         let mut lines = Vec::new();
         for i in start..end {
             if i < self.scrollback.len() {
-                lines.push(cells_to_line(&self.scrollback[i]));
+                let line = cells_to_line(&self.scrollback[i]);
+                // Truncate to visible columns.
+                let truncated = truncate_line(line, self.visible_cols);
+                lines.push(truncated);
             } else {
-                lines.push(cells_to_line(&self.grid[i - self.scrollback.len()]));
+                let line = cells_to_line(&self.grid[i - self.scrollback.len()]);
+                let truncated = truncate_line(line, self.visible_cols);
+                lines.push(truncated);
             }
         }
 
@@ -132,6 +164,16 @@ impl PtyScreen {
     /// Scroll to the bottom of the output (most recent content).
     pub fn scroll_to_bottom(&mut self) {
         self.scrollback_offset = 0;
+    }
+
+    /// Number of lines in the scrollback buffer.
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Current scrollback offset (0 = at bottom).
+    pub fn scrollback_offset(&self) -> usize {
+        self.scrollback_offset
     }
 
     fn update_style(&mut self) {
@@ -324,4 +366,26 @@ fn cells_to_line(cells: &[Cell]) -> Line<'_> {
         .map(|cell| Span::styled(cell.ch.to_string(), cell.style))
         .collect();
     Line::from(spans)
+}
+
+/// Truncate a line to at most `max_cols` cells.
+fn truncate_line(line: Line<'_>, max_cols: usize) -> Line<'_> {
+    let spans = line.spans.into_iter().collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut col = 0;
+    for span in spans {
+        let text = span.content.to_string();
+        let chars: Vec<char> = text.chars().collect();
+        if col + chars.len() > max_cols {
+            let take = max_cols.saturating_sub(col);
+            if take > 0 {
+                let trimmed: String = chars.into_iter().take(take).collect();
+                result.push(Span::styled(trimmed, span.style));
+            }
+            break;
+        }
+        col += chars.len();
+        result.push(span);
+    }
+    Line::from(result)
 }

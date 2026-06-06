@@ -36,6 +36,13 @@ pub enum PaneLayout {
     InteractionOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusedPane {
+    #[default]
+    Interaction,
+    Output,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoView {
     Metrics,
@@ -160,6 +167,8 @@ pub struct App {
     pub pending_changes: Vec<PendingChange>,
     pub apply_phase: ApplyPhase,
     pub apply_build_exit: Option<i32>,
+    /// Which pane currently has focus for arrow-key scrolling.
+    pub focused_pane: FocusedPane,
 }
 
 /// Fun status messages shown on the info line (Claude Code style).
@@ -239,6 +248,7 @@ impl App {
             chat_request: None,
             chat_rx: None,
             interaction_scroll: 0,
+            focused_pane: FocusedPane::default(),
             pending_changes: Vec::new(),
             apply_phase: ApplyPhase::Idle,
             apply_build_exit: None,
@@ -485,12 +495,30 @@ impl App {
             Action::PickerUp => {
                 if self.picker_open && self.picker_selected > 0 {
                     self.picker_selected -= 1;
+                } else if !self.picker_open {
+                    self.scroll_focused_pane(-1);
                 }
             }
             Action::PickerDown => {
                 if self.picker_open && self.picker_selected + 1 < self.picker_filtered.len() {
                     self.picker_selected += 1;
+                } else if !self.picker_open {
+                    self.scroll_focused_pane(1);
                 }
+            }
+            Action::FocusLeft => {
+                self.focused_pane = match self.pane_layout {
+                    PaneLayout::Split => FocusedPane::Interaction,
+                    PaneLayout::InteractionOnly => FocusedPane::Interaction,
+                    PaneLayout::OutputOnly => FocusedPane::Output,
+                };
+            }
+            Action::FocusRight => {
+                self.focused_pane = match self.pane_layout {
+                    PaneLayout::Split => FocusedPane::Output,
+                    PaneLayout::InteractionOnly => FocusedPane::Interaction,
+                    PaneLayout::OutputOnly => FocusedPane::Output,
+                };
             }
             Action::ScrollUp => {
                 self.interaction_scroll += 5;
@@ -503,6 +531,25 @@ impl App {
             }
             Action::OutputScrollDown => {
                 self.screen.scroll_down(5);
+            }
+        }
+    }
+
+    fn scroll_focused_pane(&mut self, delta: i16) {
+        match self.focused_pane {
+            FocusedPane::Interaction => {
+                if delta > 0 {
+                    self.interaction_scroll += delta as u16;
+                } else {
+                    self.interaction_scroll = self.interaction_scroll.saturating_sub((-delta) as u16);
+                }
+            }
+            FocusedPane::Output => {
+                if delta > 0 {
+                    self.screen.scroll_up(delta as usize);
+                } else {
+                    self.screen.scroll_down((-delta) as usize);
+                }
             }
         }
     }
@@ -533,6 +580,14 @@ impl App {
             .map(|c| c.path.display().to_string())
             .collect();
 
+        // Determine whether any applied file lives inside the orchestrator's own
+        // src/ directory before we clear the pending list.
+        let src_dir = self.cwd.join("src");
+        let any_tui = self
+            .pending_changes
+            .iter()
+            .any(|c| c.path.starts_with(&src_dir));
+
         match apply_changes(&self.pending_changes) {
             Ok(count) => {
                 self.interaction.push(InteractionMessage {
@@ -540,12 +595,6 @@ impl App {
                     text: format!("Applied {} change(s): {}", count, paths.join(", ")),
                 });
                 self.pending_changes.clear();
-
-                // Determine whether any applied file lives inside the orchestrator's
-                // own src/ directory. If so, we need to rebuild and restart.
-                let orch_dir = self.cwd.clone();
-                let src_dir = orch_dir.join("src");
-                let any_tui = paths.iter().any(|p| PathBuf::from(p).starts_with(&src_dir));
 
                 if any_tui {
                     self.apply_phase = ApplyPhase::Building;

@@ -121,11 +121,17 @@ pub fn info_panel(app: &App) -> Paragraph<'_> {
 pub fn info_extra(app: &App) -> Paragraph<'_> {
     let line = match app.info_view {
         InfoView::Metrics => {
-            let elapsed = app.elapsed_secs();
+            // Show elapsed time for the current command if one is running,
+            // otherwise show total session time.
+            let (label, elapsed) = if let Some(start) = app.command_started {
+                ("Command: ", start.elapsed().as_secs())
+            } else {
+                ("Session: ", app.elapsed_secs())
+            };
             let mins = elapsed / 60;
             let secs = elapsed % 60;
             Line::from(vec![
-                Span::styled("Elapsed: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(label, Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:02}:{:02}", mins, secs), Style::default().fg(Color::White)),
                 Span::raw(" | "),
                 Span::styled("Phase: ", Style::default().fg(Color::DarkGray)),

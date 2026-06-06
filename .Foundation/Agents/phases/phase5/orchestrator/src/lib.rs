@@ -18,9 +18,10 @@ use color_eyre::{eyre::WrapErr, Result};
 use portable_pty::{MasterPty, PtySize};
 
 use crate::action::Action;
-use crate::agents::runner::{kill_child, spawn, RunnerMsg};
+use crate::agents::runner::{kill_child, spawn, AgentCmd, RunnerMsg};
 use crate::agents::{build_agent, test_agent};
-use crate::app::{App, AgentState, PaneLayout, Phase, SpawnRequest};
+use crate::app::{App, AgentState, ApplyPhase, PaneLayout, Phase, SpawnRequest};
+use crate::apply::parse_changes;
 use crate::event::EventHandler;
 use crate::tui::init_terminal;
 use crate::ui::layout;
@@ -178,8 +179,8 @@ fn pty_size(term_cols: u16, term_rows: u16, pane_layout: PaneLayout, bottom_expa
 
 /// Resize the virtual screen and (if present) the live PTY to match the
 /// output pane for the current terminal size and pane layout.
-/// In mock mode the screen is NOT resized — clearing it would wipe content
-/// that the mock generator repopulates too slowly.
+/// The virtual screen buffer never shrinks — only the visible viewport changes
+/// — so content is preserved when the pane layout toggles.
 fn sync_pty_size(
     app: &mut App,
     master: &Option<Box<dyn MasterPty + Send>>,
@@ -187,22 +188,17 @@ fn sync_pty_size(
     term_rows: u16,
 ) {
     let size = pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded);
-    if app.mock_mode {
-        // Mock mode: only resize the screen if the terminal itself grew, so
-        // we don't lose content on pane-layout toggles.
-        let (old_rows, old_cols) = app.screen.dims();
-        let new_rows = size.rows as usize;
-        let new_cols = size.cols as usize;
-        if new_rows > old_rows || new_cols > old_cols {
-            app.screen.resize(new_rows.max(old_rows), new_cols.max(old_cols));
-        }
-        return;
+    let (old_vrows, old_vcols) = app.screen.visible_dims();
+    let new_rows = size.rows as usize;
+    let new_cols = size.cols as usize;
+
+    if new_rows != old_vrows || new_cols != old_vcols {
+        app.screen.resize(new_rows, new_cols);
     }
-    if app.screen.dims() != (size.rows as usize, size.cols as usize) {
-        app.screen.resize(size.rows as usize, size.cols as usize);
-        if let Some(m) = master {
-            let _ = m.resize(size);
-        }
+
+    // Always resize the PTY master so the child process knows the real size.
+    if let Some(m) = master {
+        let _ = m.resize(size);
     }
 }
 
@@ -239,6 +235,12 @@ pub fn run(config: Config) -> Result<()> {
     let mut child_opt: Option<Box<dyn portable_pty::Child + Send>> = None;
     let mut master_opt: Option<Box<dyn MasterPty + Send>> = None;
     let mut writer_opt: Option<Box<dyn Write + Send>> = None;
+
+    // State for the optional "cargo build --release" step triggered after
+    // applying AI-suggested changes to the orchestrator's own source.
+    let mut apply_child_opt: Option<Box<dyn portable_pty::Child + Send>> = None;
+    let mut apply_rx_opt: Option<std::sync::mpsc::Receiver<RunnerMsg>> = None;
+    let mut restart_requested = false;
 
     // Initial terminal size, kept in sync via Resize events.
     let (mut term_cols, mut term_rows) =
@@ -367,10 +369,30 @@ pub fn run(config: Config) -> Result<()> {
                         role: "assistant".to_string(),
                         content: response.clone(),
                     });
-                    app.interaction.push(crate::app::InteractionMessage {
-                        voice: crate::ui::theme::Voice::Agent,
-                        text: response,
-                    });
+
+                    // Look for code-block changes proposed by the assistant.
+                    let changes = parse_changes(&response, &app.cwd);
+                    if !changes.is_empty() {
+                        app.pending_changes = changes;
+                        app.apply_phase = ApplyPhase::Prompting;
+                        let files: Vec<String> = app
+                            .pending_changes
+                            .iter()
+                            .map(|c| c.path.display().to_string())
+                            .collect();
+                        app.interaction.push(crate::app::InteractionMessage {
+                            voice: crate::ui::theme::Voice::Agent,
+                            text: format!(
+                                "AI proposed changes to: {}\nApply and rebuild? [y/n]",
+                                files.join(", ")
+                            ),
+                        });
+                    } else {
+                        app.interaction.push(crate::app::InteractionMessage {
+                            voice: crate::ui::theme::Voice::Agent,
+                            text: response,
+                        });
+                    }
                 }
                 Ok(Err(e)) => {
                     app.chat_rx = None;
@@ -403,7 +425,130 @@ pub fn run(config: Config) -> Result<()> {
                 app.update(Action::AgentExited(code));
             }
         }
+
+        // -----------------------------------------------------------------
+        // Apply-phase build: stream output and restart on success.
+        // -----------------------------------------------------------------
+
+        // Spawn cargo build when the user approves TUI-affecting changes.
+        if app.apply_phase == ApplyPhase::Building && apply_child_opt.is_none() && !config.mock {
+            let cwd = app.cwd.display().to_string();
+            let cargo_args = cargo_build_args();
+            let cmd = AgentCmd {
+                program: "cargo".to_string(),
+                args: cargo_args,
+                env: Vec::new(),
+                cwd: Some(cwd),
+            };
+            match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded)) {
+                Ok((c, _m, _w, rx)) => {
+                    apply_child_opt = Some(c);
+                    apply_rx_opt = Some(rx);
+                    app.command_started = Some(std::time::Instant::now());
+                }
+                Err(e) => {
+                    app.apply_phase = ApplyPhase::Idle;
+                    app.interaction.push(crate::app::InteractionMessage {
+                        voice: crate::ui::theme::Voice::Error,
+                        text: format!("Failed to spawn cargo build: {}", e),
+                    });
+                }
+            }
+        }
+
+        // Stream cargo build output to the output pane.
+        if let Some(ref rx) = apply_rx_opt {
+            loop {
+                match rx.try_recv() {
+                    Ok(RunnerMsg::Bytes(buf)) => {
+                        app.screen.advance(&buf);
+                    }
+                    Ok(RunnerMsg::Error(msg)) => {
+                        app.interaction.push(crate::app::InteractionMessage {
+                            voice: crate::ui::theme::Voice::Error,
+                            text: msg,
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // Poll cargo build exit.
+        if let Some(ref mut c) = apply_child_opt {
+            if let Ok(Some(code)) = c.try_wait() {
+                let code = code.exit_code() as i32;
+                apply_child_opt = None;
+                apply_rx_opt = None;
+                app.apply_build_exit = Some(code);
+                app.command_started = None;
+
+                if code == 0 {
+                    app.interaction.push(crate::app::InteractionMessage {
+                        voice: crate::ui::theme::Voice::Agent,
+                        text: "Build succeeded. Restarting TUI...".to_string(),
+                    });
+                    restart_requested = true;
+                    app.should_quit = true;
+                } else {
+                    app.apply_phase = ApplyPhase::Idle;
+                    app.interaction.push(crate::app::InteractionMessage {
+                        voice: crate::ui::theme::Voice::Error,
+                        text: format!(
+                            "cargo build failed (exit {}). Fix the errors and try again.",
+                            code
+                        ),
+                    });
+                }
+            }
+        }
     }
-    // Terminal is restored by TerminalGuard drop.
+
+    // Terminal is restored by TerminalGuard drop before we potentially exec.
+    if restart_requested {
+        restart_orchestrator()?;
+    }
+
     Ok(())
+}
+
+/// Replace the current process with a freshly built `orch` binary, preserving
+/// the original CLI arguments. Only called on Unix (macOS/Linux).
+fn restart_orchestrator() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::env::current_exe()
+        .wrap_err("Unable to determine current executable path for restart")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(&args);
+
+    // `exec` replaces the current process; on success it does not return.
+    let err = cmd.exec();
+    Err(color_eyre::eyre::eyre!(
+        "Failed to exec restarted orchestrator ({}): {}",
+        exe.display(),
+        err
+    ))
+}
+
+/// Determine whether the running binary was built in debug or release mode by
+/// inspecting its path. This lets us run the matching `cargo build` profile.
+fn is_release_build() -> bool {
+    if let Ok(exe) = std::env::current_exe() {
+        let path = exe.to_string_lossy();
+        // Match both /target/release/ and /target/release-{hash}/ style paths.
+        return path.contains("/target/release") || path.contains("\\target\\release");
+    }
+    true // default to release for safety
+}
+
+/// Return the correct `cargo build` argument list for the current binary.
+fn cargo_build_args() -> Vec<String> {
+    if is_release_build() {
+        vec!["build".to_string(), "--release".to_string()]
+    } else {
+        vec!["build".to_string()]
+    }
 }

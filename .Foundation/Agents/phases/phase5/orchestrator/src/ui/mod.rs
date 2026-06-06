@@ -1,3 +1,4 @@
+pub mod confirm;
 pub mod layout;
 pub mod panes;
 pub mod picker;
@@ -5,7 +6,11 @@ pub mod prompt;
 pub mod status_bar;
 pub mod theme;
 
-use ratatui::Frame;
+use ratatui::{
+    style::{Color, Style},
+    widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState},
+    Frame,
+};
 
 use crate::app::App;
 
@@ -16,9 +21,37 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if app.pane_layout != crate::app::PaneLayout::OutputOnly {
         frame.render_widget(panes::interaction(app), interaction);
+        // Scrollbar for interaction pane
+        let total = app.interaction.len();
+        let viewport = total.min(panes::VISIBLE_MESSAGE_WINDOW);
+        let position = total.saturating_sub(viewport + app.interaction_scroll as usize);
+        let mut state = ScrollbarState::new(total)
+            .position(position)
+            .viewport_content_length(viewport);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .style(Style::default().fg(Color::DarkGray)),
+            interaction,
+            &mut state,
+        );
     }
     if app.pane_layout != crate::app::PaneLayout::InteractionOnly {
         frame.render_widget(panes::output(app), output);
+        // Scrollbar for output pane
+        let (rows, _cols) = app.screen.dims();
+        let scrollback = app.screen.scrollback_len();
+        let total = scrollback + rows;
+        let offset = app.screen.scrollback_offset();
+        let position = total.saturating_sub(rows + offset);
+        let mut state = ScrollbarState::new(total)
+            .position(position)
+            .viewport_content_length(rows);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .style(Style::default().fg(Color::DarkGray)),
+            output,
+            &mut state,
+        );
     }
 
     // Split info line into left (spinner + fun status) and right (app name + provider/model).
@@ -45,6 +78,9 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Render command picker overlay on top
     picker::render(frame, app);
+
+    // Render pending-changes confirmation modal on top of everything
+    confirm::render(frame, app);
 }
 
 #[cfg(test)]

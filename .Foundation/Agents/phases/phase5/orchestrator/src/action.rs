@@ -28,4 +28,7 @@ pub enum Action {
     ScrollDown,
     OutputScrollUp,
     OutputScrollDown,
+    // Pane focus
+    FocusLeft,
+    FocusRight,
 }

@@ -4,11 +4,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::app::App;
+use crate::app::{App, FocusedPane};
 use crate::ui::theme::Voice;
 
 /// Approximate number of messages to keep visible in the interaction pane.
-const VISIBLE_MESSAGE_WINDOW: usize = 200;
+pub const VISIBLE_MESSAGE_WINDOW: usize = 200;
 
 /// Render the interaction pane with color-coded messages and scroll support.
 pub fn interaction(app: &App) -> Paragraph<'_> {
@@ -50,8 +50,14 @@ pub fn interaction(app: &App) -> Paragraph<'_> {
         })
         .collect();
 
+    let border_style = if app.focused_pane == FocusedPane::Interaction {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     Paragraph::new(lines)
-        .block(Block::default().title("Interaction").borders(Borders::ALL))
+        .block(Block::default().title("Interaction").borders(Borders::ALL).border_style(border_style))
         .wrap(Wrap { trim: true })
         .style(Style::default())
 }
@@ -101,7 +107,13 @@ fn render_line_with_prefix<'a>(
 /// Render the output pane (PTY screen) with scroll support.
 pub fn output(app: &App) -> Paragraph<'_> {
     let text = app.screen.as_text();
+    let border_style = if app.focused_pane == FocusedPane::Output {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     Paragraph::new(text)
-        .block(Block::default().title("Output").borders(Borders::ALL))
+        .block(Block::default().title("Output").borders(Borders::ALL).border_style(border_style))
         .style(Style::default())
 }
