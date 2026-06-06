@@ -96,7 +96,7 @@ OPTIONS:
     --audit                 Generate accessibility audit report
     --use-docs              Use Cursor @docs references (default: true)
     --no-docs               Disable documentation references
-    --ai-provider <name>    AI provider: cursor, claude, codex, gemini, aider, letta
+    --ai-provider <name>    AI provider: cursor, claude, codex, gemini, aider, letta, kimi
     --yolo                  Auto-approve AI changes (unattended mode)
     --max-retries <n>       Maximum retry attempts (default: 3)
     --artifacts-dir <path>  Output directory for artifacts
@@ -559,13 +559,17 @@ OUTPUT:
 Generate the complete modified Swift file with accessibility modifiers added.
 Preserve all existing functionality. Only add accessibility modifiers.
 Start with import statements and end with the closing brace.
+
+CRITICAL: Do NOT write markdown tables, summaries, bullet points, or prose.
+Output raw Swift code only. Any non-code text will break the build.
 EOF
 }
 
-# Enhance accessibility for a view file
-enhance_accessibility() {
+# Enhance accessibility for a view file (batch mode — no build verification)
+enhance_accessibility_only() {
     local file="$1"
-    local retry_count=0
+    local context="$2"
+    local prompt_override="${3:-}"
 
     log_section "Enhancing accessibility: $(basename "$file")"
 
@@ -573,31 +577,32 @@ enhance_accessibility() {
     local content
     content=$(cat "$file")
 
-    # Backup original file
+    # Backup original file (kept until build passes)
     local backup_file="${file}.backup"
     cp "$file" "$backup_file"
 
-    # Gather accessibility context
-    local context=""
-    if [ "$USE_DOCS" = "true" ]; then
-        context=$(gather_test_context "${ACCESSIBILITY_CONTEXT_PATHS[@]}")
-    fi
-
     # Build prompt
     local prompt
-    prompt=$(build_accessibility_prompt "$file" "$content" "$context")
+    if [ -n "$prompt_override" ]; then
+        prompt="$prompt_override"
+    else
+        prompt=$(build_accessibility_prompt "$file" "$content" "$context")
+    fi
 
     if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY RUN] Would enhance: $file"
+        rm -f "$backup_file"
         return 0
     fi
 
     if [ "$SCAN_ONLY" = "true" ]; then
         log_info "[SCAN ONLY] Would enhance: $file"
+        rm -f "$backup_file"
         return 0
     fi
 
-    # Retry loop
+    # Retry loop for AI generation (prose/truncation only, NOT build errors)
+    local retry_count=0
     while [ $retry_count -lt $MAX_RETRIES ]; do
         retry_count=$((retry_count + 1))
         log_info "Attempt $retry_count/$MAX_RETRIES"
@@ -620,11 +625,30 @@ enhance_accessibility() {
         local enhanced_code
         enhanced_code=$(cat "$ai_output_file")
 
-        # Clean up code (remove markdown code blocks if present)
-        enhanced_code=$(echo "$enhanced_code" | sed '/^```swift$/d' | sed '/^```$/d')
+        # Extract Swift code from markdown, detecting prose-only or truncated output
+        local extracted_code
+        local code_valid=false
+        if extracted_code=$(extract_swift_code "$enhanced_code"); then
+            enhanced_code="$extracted_code"
+            code_valid=true
+        else
+            log_warning "AI output contained no valid Swift code (prose/truncated). Retrying..."
+            if [ $retry_count -lt $MAX_RETRIES ]; then
+                prompt="Generate a valid Swift file with accessibility modifiers for $(basename "$file"). The previous response contained explanations or truncated code instead of the complete file. Output ONLY the full raw Swift code starting with import statements. No markdown, no prose, no placeholders."
+                continue
+            fi
+            # Last resort: use raw output minus fences, but DON'T overwrite backup
+            enhanced_code=$(echo "$enhanced_code" | sed -E '/^```(swift)?\s*$/d')
+        fi
 
-        # Write enhanced file
-        echo "$enhanced_code" > "$file"
+        # Only write if code is valid; otherwise restore backup
+        if [ "$code_valid" = "true" ]; then
+            echo "$enhanced_code" > "$file"
+        else
+            log_warning "Skipping write for $file — restoring backup (new output was invalid)."
+            mv "$backup_file" "$file"
+            return 10
+        fi
 
         # Count identifiers added
         local old_count new_count
@@ -635,48 +659,165 @@ enhance_accessibility() {
             IDENTIFIERS_ADDED=$((IDENTIFIERS_ADDED + added))
         fi
 
-        # Verify build
-        log_info "Verifying build..."
-        if run_build_lint --logs-dir "$LOGS_DIR" --scheme "$SCHEME"; then
-            log_success "Build verification passed"
-            VIEWS_MODIFIED=$((VIEWS_MODIFIED + 1))
-            rm -f "$backup_file"
-            return 0
-        else
-            log_warning "Build failed, extracting errors..."
-
-            # Get error feedback
-            local error_log="${LOGS_DIR}/error.log"
-            if [ -f "$error_log" ]; then
-                local errors
-                errors=$(cat "$error_log")
-
-                # Update prompt with error feedback
-                prompt="The previous accessibility enhancement had build errors:
-
-$errors
-
-Please fix the following enhanced file:
-\`\`\`swift
-$enhanced_code
-\`\`\`
-
-Original file for reference:
-\`\`\`swift
-$content
-\`\`\`
-
-Generate the corrected file with accessibility modifiers."
-
-                rm -f "$error_log"
-            fi
-        fi
+        VIEWS_MODIFIED=$((VIEWS_MODIFIED + 1))
+        log_success "Enhanced: $file"
+        return 0
     done
 
     # Restore backup on failure
     log_error "Failed to enhance accessibility after $MAX_RETRIES attempts"
-    mv "$backup_file" "$file"
+    if [ -f "$backup_file" ]; then
+        mv "$backup_file" "$file"
+    fi
     write_error_log "Failed to enhance accessibility for: $file"
+    return 10
+}
+
+# Fix an accessibility-enhanced file using build error feedback
+fix_accessibility_file() {
+    local file="$1"
+    local errors="$2"
+    local context="$3"
+    local retry_count=0
+
+    local backup_file="${file}.backup"
+    if [ ! -f "$backup_file" ]; then
+        log_error "No backup found for $file — cannot restore original"
+        return 1
+    fi
+
+    # Restore original from backup before re-enhancing
+    cp "$backup_file" "$file"
+
+    local content
+    content=$(cat "$file")
+
+    log_info "Fixing: $(basename "$file")"
+
+    while [ $retry_count -lt $MAX_RETRIES ]; do
+        retry_count=$((retry_count + 1))
+        log_info "Fix attempt $retry_count/$MAX_RETRIES for $(basename "$file")"
+
+        local prompt="The following accessibility-enhanced file had build errors:
+
+BUILD ERRORS:
+$errors
+
+Please re-enhance the following original file with accessibility modifiers, fixing all build errors:
+
+ORIGINAL FILE ($(basename "$file")):
+\`\`\`swift
+$content
+\`\`\`
+
+Generate the corrected file with accessibility modifiers.
+
+REFERENCE DOCUMENTATION:
+$context
+
+CRITICAL: Output ONLY raw Swift code. Do NOT include markdown tables, summaries, explanations, bullet points, or any prose. Start with import statements."
+
+        local ai_output_file="${LOGS_DIR}/ai_accessibility_fix_$(basename "$file" .swift)_${retry_count}.txt"
+
+        if ! run_ai_cli "$prompt" --provider "$AI_PROVIDER" --output "$ai_output_file"; then
+            log_error "AI fix generation failed for $(basename "$file")"
+            if [ $retry_count -lt $MAX_RETRIES ]; then
+                continue
+            fi
+            return 12
+        fi
+
+        local enhanced_code
+        enhanced_code=$(cat "$ai_output_file")
+
+        local extracted_code
+        if extracted_code=$(extract_swift_code "$enhanced_code"); then
+            enhanced_code="$extracted_code"
+        else
+            log_warning "AI fix output contained no valid Swift code. Retrying..."
+            if [ $retry_count -lt $MAX_RETRIES ]; then
+                continue
+            fi
+            enhanced_code=$(echo "$enhanced_code" | sed -E '/^```(swift)?\s*$/d')
+        fi
+
+        echo "$enhanced_code" > "$file"
+        log_success "Updated: $file"
+        return 0
+    done
+
+    log_error "Failed to fix $(basename "$file") after $MAX_RETRIES attempts"
+    return 10
+}
+
+# Parse build error.log and return list of broken source file paths
+find_broken_source_files_from_errors() {
+    local error_log="$1"
+    if [ ! -f "$error_log" ]; then
+        return 0
+    fi
+
+    # Extract .swift file paths from xcodebuild-style errors
+    grep -oE '^[^[:space:]]+\.swift' "$error_log" 2>/dev/null | sort -u
+}
+
+# Batch build verification and fix loop for accessibility enhancements
+build_and_fix_accessibility() {
+    local fix_round=0
+
+    while [ $fix_round -lt $MAX_RETRIES ]; do
+        fix_round=$((fix_round + 1))
+        log_section "Build verification (round $fix_round/$MAX_RETRIES)"
+
+        if [ "$DRY_RUN" = "true" ]; then
+            log_info "[DRY RUN] Would run build"
+            return 0
+        fi
+
+        rm -f "${LOGS_DIR}/error.log"
+
+        if run_build_lint --logs-dir "$LOGS_DIR" --scheme "$SCHEME"; then
+            log_success "Build verification passed — all accessibility enhancements compile"
+            # Clean up all backups on success
+            find . -name "*.backup" -type f -delete 2>/dev/null || true
+            return 0
+        fi
+
+        log_warning "Build failed, analyzing errors..."
+
+        local error_log="${LOGS_DIR}/error.log"
+        if [ ! -f "$error_log" ]; then
+            log_error "Build failed but no error.log found"
+            return 10
+        fi
+
+        local broken_files
+        broken_files=$(find_broken_source_files_from_errors "$error_log")
+
+        if [ -z "$broken_files" ]; then
+            log_error "Build failed but no source file errors detected (may be project configuration issues)"
+            cat "$error_log" >&2
+            return 10
+        fi
+
+        local errors
+        errors=$(cat "$error_log")
+
+        local fix_count=0
+        while IFS= read -r broken_file; do
+            [ -z "$broken_file" ] && continue
+            # Only fix files we have backups for (i.e., files we modified)
+            if [ -f "${broken_file}.backup" ]; then
+                if fix_accessibility_file "$broken_file" "$errors" "$context"; then
+                    fix_count=$((fix_count + 1))
+                fi
+            fi
+        done <<< "$broken_files"
+
+        log_info "Fixed $fix_count file(s), rebuilding..."
+    done
+
+    log_error "Build still failing after $MAX_RETRIES fix rounds"
     return 10
 }
 
@@ -784,26 +925,53 @@ main() {
 
     local exit_code=0
 
-    # Analyze and optionally enhance each view
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 1: Analyze all views (existing behavior, no AI calls)
+    # ═══════════════════════════════════════════════════════════════════════════
+    log_section "PHASE 1: Analyzing views"
     while IFS= read -r file; do
         [ -z "$file" ] && continue
 
-        # Analyze accessibility
         analyze_view_accessibility "$file"
 
-        # Validate against live UI if enabled
         if [ "$USE_AXE" = "true" ]; then
             validate_live_accessibility "$file"
         fi
+    done <<< "$view_files"
 
-        # Enhance if not scan-only
-        if [ "$SCAN_ONLY" = "false" ]; then
-            if ! enhance_accessibility "$file"; then
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 2: Batch enhance all views (no builds)
+    # ═══════════════════════════════════════════════════════════════════════════
+    if [ "$SCAN_ONLY" = "false" ]; then
+        log_section "PHASE 2: Enhancing views (batch mode)"
+
+        # Gather context once, cache across runs
+        local accessibility_context=""
+        if [ "$USE_DOCS" = "true" ]; then
+            local cache_key
+            cache_key=$(compute_context_key "accessibility-agent" "${ACCESSIBILITY_CONTEXT_PATHS[@]}")
+            accessibility_context=$(gather_test_context --cache-key "$cache_key" "${ACCESSIBILITY_CONTEXT_PATHS[@]}")
+        fi
+
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            if ! enhance_accessibility_only "$file" "$accessibility_context"; then
                 exit_code=10
                 # Continue with other files
             fi
+        done <<< "$view_files"
+    fi
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 3: Build once, fix broken enhancements, repeat
+    # ═══════════════════════════════════════════════════════════════════════════
+    if [ "$SCAN_ONLY" = "false" ] && [ $VIEWS_MODIFIED -gt 0 ]; then
+        log_section "PHASE 3: Build verification and fix loop"
+        if ! build_and_fix_accessibility; then
+            exit_code=10
         fi
-    done <<< "$view_files"
+    fi
 
     # Run AXe audit if requested
     if [ "$AXE_AUDIT" = "true" ]; then

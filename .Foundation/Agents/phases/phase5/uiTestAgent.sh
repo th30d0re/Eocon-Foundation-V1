@@ -96,7 +96,7 @@ OPTIONS:
     --generate-test-plan    Create .xctestplan file
     --devices <list>        Device configurations (comma-separated)
     --no-page-objects       Skip page object generation
-    --ai-provider <name>    AI provider: cursor, claude, codex, gemini, aider, letta
+    --ai-provider <name>    AI provider: cursor, claude, codex, gemini, aider, letta, kimi
     --yolo                  Auto-approve AI changes
     --max-retries <n>       Maximum retry attempts (default: 3)
     --artifacts-dir <path>  Output directory for artifacts
@@ -401,6 +401,9 @@ $context
 
 OUTPUT:
 Generate ONLY the Swift test file. No explanations.
+
+CRITICAL: Do NOT write markdown tables, summaries, bullet points, or prose.
+Output raw Swift code only. Any non-code text will break the build.
 EOF
 }
 
@@ -504,10 +507,11 @@ validate_element_identifiers() {
     return 0
 }
 
-# Generate UI test for a flow
+# Generate UI test for a flow (batch mode — no build verification)
 generate_ui_test_for_flow() {
     local flow_json="$1"
-    local retry_count=0
+    local context="$2"
+    local prompt_override="${3:-}"
 
     # Extract flow name and feature
     local flow_name
@@ -517,10 +521,6 @@ generate_ui_test_for_flow() {
 
     log_section "Generating UI test: ${feature_name}_${flow_name}"
 
-    # Gather context
-    local context
-    context=$(gather_test_context "${UI_TEST_CONTEXT_PATHS[@]}")
-
     # Load UI hierarchy if available
     local ui_hierarchy_json=""
     if [ -f "${ARTIFACTS_DIR}/ui_hierarchy.json" ]; then
@@ -529,17 +529,28 @@ generate_ui_test_for_flow() {
 
     # Build prompt
     local prompt
-    prompt=$(build_ui_test_prompt "$flow_json" "$context" "$ui_hierarchy_json")
+    if [ -n "$prompt_override" ]; then
+        prompt="$prompt_override"
+    else
+        prompt=$(build_ui_test_prompt "$flow_json" "$context" "$ui_hierarchy_json")
+    fi
 
     # Determine test file path
     local test_file="${UI_TEST_TARGET_DIR}/${feature_name}UITests.swift"
+
+    # Skip if test file already exists (don't waste tokens regenerating good tests)
+    if [ -f "$test_file" ]; then
+        log_info "UI test file already exists, skipping: $(basename "$test_file")"
+        return 0
+    fi
 
     if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY RUN] Would generate: $test_file"
         return 0
     fi
 
-    # Retry loop
+    # Retry loop for AI generation (prose/truncation only, NOT build errors)
+    local retry_count=0
     while [ $retry_count -lt $MAX_RETRIES ]; do
         retry_count=$((retry_count + 1))
         log_info "Attempt $retry_count/$MAX_RETRIES"
@@ -558,49 +569,172 @@ generate_ui_test_for_flow() {
         # Extract Swift code
         local generated_code
         generated_code=$(cat "$ai_output_file")
-        generated_code=$(echo "$generated_code" | sed '/^```swift$/d' | sed '/^```$/d')
 
-        # Write test file
-        mkdir -p "$(dirname "$test_file")"
-        echo "$generated_code" > "$test_file"
-        log_success "Generated: $test_file"
+        # Extract Swift code from markdown, detecting prose-only or truncated output
+        local extracted_code
+        local code_valid=false
+        if extracted_code=$(extract_swift_code "$generated_code"); then
+            generated_code="$extracted_code"
+            code_valid=true
+        else
+            log_warning "AI output contained no valid Swift code (prose/truncated). Retrying..."
+            if [ $retry_count -lt $MAX_RETRIES ]; then
+                prompt="Generate a valid Swift XCUITest file. The previous response contained explanations or truncated code instead of the complete file. Output ONLY the full raw Swift code starting with import statements. No markdown, no prose, no placeholders."
+                continue
+            fi
+            # Last resort: use raw output minus fences, but DON'T overwrite existing good file
+            generated_code=$(echo "$generated_code" | sed -E '/^```(swift)?\s*$/d')
+        fi
 
-        # Verify build
-        log_info "Verifying build..."
-        if run_build_lint --logs-dir "$LOGS_DIR"; then
-            log_success "Build verification passed"
+        # Only write if code is valid OR no previous good version exists
+        if [ "$code_valid" = "true" ] || [ ! -f "$test_file" ]; then
+            mkdir -p "$(dirname "$test_file")"
+            echo "$generated_code" > "$test_file"
+            log_success "Generated: $test_file"
             UI_TESTS_GENERATED=$((UI_TESTS_GENERATED + 1))
             return 0
         else
-            log_warning "Build failed, extracting errors..."
-
-            local error_log="${LOGS_DIR}/error.log"
-            if [ -f "$error_log" ]; then
-                local errors
-                errors=$(cat "$error_log")
-
-                prompt="The UI test had build errors:
-
-$errors
-
-Fix the following test:
-\`\`\`swift
-$generated_code
-\`\`\`
-
-Original flow:
-\`\`\`json
-$flow_json
-\`\`\`
-
-Generate the corrected test file."
-
-                rm -f "$error_log"
-            fi
+            log_warning "Skipping write for $test_file — existing file preserved (new output was invalid)."
         fi
     done
 
     log_error "Failed to generate UI test after $MAX_RETRIES attempts"
+    return 10
+}
+
+# Fix a UI test file using build error feedback
+fix_ui_test_file() {
+    local test_file="$1"
+    local errors="$2"
+    local context="$3"
+    local retry_count=0
+
+    local base_name
+    base_name=$(basename "$test_file" "UITests.swift")
+
+    local current_test_content
+    current_test_content=$(cat "$test_file")
+
+    log_info "Fixing: $(basename "$test_file")"
+
+    while [ $retry_count -lt $MAX_RETRIES ]; do
+        retry_count=$((retry_count + 1))
+        log_info "Fix attempt $retry_count/$MAX_RETRIES for $(basename "$test_file")"
+
+        local prompt="The following UI test file has build errors:
+
+BUILD ERRORS:
+$errors
+
+CURRENT TEST FILE ($(basename "$test_file")):
+\`\`\`swift
+$current_test_content
+\`\`\`
+
+Please fix the test file to resolve all build errors.
+
+REFERENCE DOCUMENTATION:
+$context
+
+CRITICAL: Output ONLY the corrected raw Swift code. Do NOT include markdown tables, summaries, explanations, bullet points, or any prose. Start with import statements."
+
+        local ai_output_file="${LOGS_DIR}/ai_fix_${base_name}_${retry_count}.txt"
+
+        if ! run_ai_cli "$prompt" --provider "$AI_PROVIDER" --output "$ai_output_file"; then
+            log_error "AI fix generation failed for $(basename "$test_file")"
+            if [ $retry_count -lt $MAX_RETRIES ]; then
+                continue
+            fi
+            return 12
+        fi
+
+        local generated_code
+        generated_code=$(cat "$ai_output_file")
+
+        local extracted_code
+        if extracted_code=$(extract_swift_code "$generated_code"); then
+            generated_code="$extracted_code"
+        else
+            log_warning "AI fix output contained no valid Swift code. Retrying..."
+            if [ $retry_count -lt $MAX_RETRIES ]; then
+                continue
+            fi
+            generated_code=$(echo "$generated_code" | sed -E '/^```(swift)?\s*$/d')
+        fi
+
+        echo "$generated_code" > "$test_file"
+        log_success "Updated: $test_file"
+        return 0
+    done
+
+    log_error "Failed to fix $(basename "$test_file") after $MAX_RETRIES attempts"
+    return 10
+}
+
+# Parse build error.log and return list of broken UI test file paths
+find_broken_ui_test_files_from_errors() {
+    local error_log="$1"
+    if [ ! -f "$error_log" ]; then
+        return 0
+    fi
+
+    grep -oE "${UI_TEST_TARGET_DIR}/[^[:space:]]+UITests\.swift" "$error_log" 2>/dev/null | sort -u
+}
+
+# Batch build verification and fix loop for UI tests
+build_and_fix_ui_tests() {
+    local fix_round=0
+
+    while [ $fix_round -lt $MAX_RETRIES ]; do
+        fix_round=$((fix_round + 1))
+        log_section "Build verification (round $fix_round/$MAX_RETRIES)"
+
+        if [ "$DRY_RUN" = "true" ]; then
+            log_info "[DRY RUN] Would run build"
+            return 0
+        fi
+
+        rm -f "${LOGS_DIR}/error.log"
+
+        if run_build_lint --logs-dir "$LOGS_DIR"; then
+            log_success "Build verification passed — all UI tests compile"
+            return 0
+        fi
+
+        log_warning "Build failed, analyzing errors..."
+
+        local error_log="${LOGS_DIR}/error.log"
+        if [ ! -f "$error_log" ]; then
+            log_error "Build failed but no error.log found"
+            return 10
+        fi
+
+        local broken_files
+        broken_files=$(find_broken_ui_test_files_from_errors "$error_log")
+
+        if [ -z "$broken_files" ]; then
+            log_error "Build failed but no UI test file errors detected (may be source or project issues)"
+            cat "$error_log" >&2
+            return 10
+        fi
+
+        local errors
+        errors=$(cat "$error_log")
+
+        local fix_count=0
+        while IFS= read -r test_file; do
+            [ -z "$test_file" ] && continue
+            if [ -f "$test_file" ]; then
+                if fix_ui_test_file "$test_file" "$errors" "$context"; then
+                    fix_count=$((fix_count + 1))
+                fi
+            fi
+        done <<< "$broken_files"
+
+        log_info "Fixed $fix_count UI test file(s), rebuilding..."
+    done
+
+    log_error "Build still failing after $MAX_RETRIES fix rounds"
     return 10
 }
 
@@ -665,6 +799,9 @@ REQUIREMENTS:
 
 OUTPUT:
 Generate the Swift page object file(s). No explanations.
+
+CRITICAL: Do NOT write markdown tables, summaries, bullet points, or prose.
+Output raw Swift code only. Any non-code text will break the build.
 EOF
 }
 
@@ -701,11 +838,32 @@ generate_page_objects() {
     local page_objects_dir="${UI_TEST_TARGET_DIR}/PageObjects"
     mkdir -p "$page_objects_dir"
 
+    # Skip if page objects already exist (don't waste tokens regenerating good code)
+    if [ -f "${page_objects_dir}/Pages.swift" ]; then
+        log_info "Page objects already exist, skipping generation"
+        return 0
+    fi
+
     local generated_code
     generated_code=$(cat "$ai_output_file")
-    generated_code=$(echo "$generated_code" | sed '/^```swift$/d' | sed '/^```$/d')
 
-    echo "$generated_code" > "${page_objects_dir}/Pages.swift"
+    # Extract Swift code from markdown, detecting prose-only or truncated output
+    local extracted_code
+    local code_valid=false
+    if extracted_code=$(extract_swift_code "$generated_code"); then
+        generated_code="$extracted_code"
+        code_valid=true
+    else
+        log_warning "AI output contained no valid Swift code (prose/truncated)"
+        generated_code=$(echo "$generated_code" | sed -E '/^```(swift)?\s*$/d')
+    fi
+
+    # Only write if code is valid OR no previous good version exists
+    if [ "$code_valid" = "true" ] || [ ! -f "${page_objects_dir}/Pages.swift" ]; then
+        echo "$generated_code" > "${page_objects_dir}/Pages.swift"
+    else
+        log_warning "Skipping write for Pages.swift — existing file preserved (new output was invalid)."
+    fi
     log_success "Generated: ${page_objects_dir}/Pages.swift"
 
     PAGE_OBJECTS_GENERATED=1
@@ -860,11 +1018,21 @@ main() {
         exit 0
     fi
 
-    # Generate UI tests for each flow
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 1: Batch generate all missing UI test files and page objects
+    # ═══════════════════════════════════════════════════════════════════════════
+    log_section "PHASE 1: Generating UI test files (batch mode)"
+
+    # Gather context once, cache across runs
+    local ui_context
+    local cache_key
+    cache_key=$(compute_context_key "ui-test-agent" "${UI_TEST_CONTEXT_PATHS[@]}")
+    ui_context=$(gather_test_context --cache-key "$cache_key" "${UI_TEST_CONTEXT_PATHS[@]}")
+
     while IFS= read -r flow_json; do
         [ -z "$flow_json" ] && continue
 
-        if ! generate_ui_test_for_flow "$flow_json"; then
+        if ! generate_ui_test_for_flow "$flow_json" "$ui_context"; then
             exit_code=10
             # Continue with other flows
         fi
@@ -874,11 +1042,23 @@ main() {
         jq -c '.flows[]' "$FLOWS_PATH"
     fi)
 
-    # Generate page objects
+    # Generate page objects (also before build)
     generate_page_objects
 
     # Generate test plan
     generate_test_plan
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 2: Build once, fix broken UI tests, repeat
+    # ═══════════════════════════════════════════════════════════════════════════
+    if [ $UI_TESTS_GENERATED -gt 0 ] || [ -n "$(find "${UI_TEST_TARGET_DIR}" -name "*UITests.swift" 2>/dev/null)" ]; then
+        log_section "PHASE 2: Build verification and fix loop"
+        if ! build_and_fix_ui_tests; then
+            exit_code=10
+        fi
+    else
+        log_info "No UI test files to build"
+    fi
 
     # Generate report
     generate_ui_test_report

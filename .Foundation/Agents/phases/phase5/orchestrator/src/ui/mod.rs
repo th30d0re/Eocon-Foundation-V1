@@ -1,0 +1,176 @@
+pub mod layout;
+pub mod panes;
+pub mod picker;
+pub mod prompt;
+pub mod status_bar;
+pub mod theme;
+
+use ratatui::Frame;
+
+use crate::app::App;
+
+/// Render the full UI in a single draw() call.
+pub fn render(frame: &mut Frame, app: &App) {
+    let (interaction, output, info_line, info_panel, info_extra, input) =
+        layout::compute(frame.area(), app.pane_layout, app.bottom_expanded);
+
+    if app.pane_layout != crate::app::PaneLayout::OutputOnly {
+        frame.render_widget(panes::interaction(app), interaction);
+    }
+    if app.pane_layout != crate::app::PaneLayout::InteractionOnly {
+        frame.render_widget(panes::output(app), output);
+    }
+
+    // Split info line into left (spinner + fun status) and right (app name + provider/model).
+    // Left side gets exactly the width it needs when active; right side takes the remainder.
+    let spinner_width = prompt::info_line_right_width(app).min(info_line.width.saturating_sub(20));
+    let info_width = info_line.width.saturating_sub(spinner_width);
+    let info_left = ratatui::layout::Rect::new(info_line.x, info_line.y, spinner_width, info_line.height);
+    let info_right = ratatui::layout::Rect::new(
+        info_line.x + spinner_width,
+        info_line.y,
+        info_width,
+        info_line.height,
+    );
+    frame.render_widget(prompt::info_line_right(app), info_left);
+    frame.render_widget(prompt::info_line_left(app), info_right);
+
+    if let Some(panel_rect) = info_panel {
+        frame.render_widget(prompt::info_panel(app), panel_rect);
+    }
+    if let Some(extra_rect) = info_extra {
+        frame.render_widget(prompt::info_extra(app), extra_rect);
+    }
+    frame.render_widget(prompt::input_bar(app), input);
+
+    // Render command picker overlay on top
+    picker::render(frame, app);
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use super::*;
+
+    #[test]
+    fn mock_render_shows_info_and_input() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(true);
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        // With 24 rows: top (22) + bottom (2). Info = row 22, input = row 23.
+        let info_row = 22;
+        let input_row = 23;
+
+        let info_text: String = (0..80)
+            .map(|col| buf[(col, info_row)].symbol().to_string())
+            .collect();
+        assert!(
+            info_text.contains("Provider"),
+            "info line missing provider. got: {}",
+            info_text.trim()
+        );
+
+        let input_text: String = (0..80)
+            .map(|col| buf[(col, input_row)].symbol().to_string())
+            .collect();
+        assert!(
+            input_text.contains(">"),
+            "input bar missing prompt. got: {}",
+            input_text.trim()
+        );
+    }
+
+    #[test]
+    fn expanded_bottom_shows_info_panel() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(true);
+        app.bottom_expanded = true;
+        app.current_provider = Some("anthropic".to_string());
+        app.current_model = Some("claude-sonnet-4".to_string());
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // With expanded bottom (4 lines): info_line=row 20, panel=row 21, extra=row 22, input=row 23
+        let panel_row = 21;
+        let panel_text: String = (0..80)
+            .map(|col| buf[(col, panel_row)].symbol().to_string())
+            .collect();
+        assert!(
+            panel_text.contains("claude-sonnet-4"),
+            "info panel missing model. got: {}",
+            panel_text.trim()
+        );
+    }
+
+    #[test]
+    fn typing_does_not_panic() {
+        use crate::action::Action;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(false);
+
+        // Simulate typing "/help"
+        for c in "/help".chars() {
+            app.update(Action::InputChar(c));
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+        }
+        app.update(Action::InputSubmit);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        // Simulate typing "/provider openai"
+        app = App::new(false);
+        for c in "/provider openai".chars() {
+            app.update(Action::InputChar(c));
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+        }
+
+        // Simulate typing regular text
+        app = App::new(false);
+        for c in "hello world".chars() {
+            app.update(Action::InputChar(c));
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn multiline_message_renders_as_separate_lines() {
+        use crate::app::InteractionMessage;
+        use crate::ui::theme::Voice;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(false); // mock=false so no seed messages
+        app.interaction.push(InteractionMessage {
+            voice: Voice::Agent,
+            text: "line one\nline two\nline three".to_string(),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Interaction pane is the top-left area. With borders, content starts at row 1.
+        let row1: String = (1..40).map(|col| buf[(col, 1)].symbol().to_string()).collect();
+        let row2: String = (1..40).map(|col| buf[(col, 2)].symbol().to_string()).collect();
+        let row3: String = (1..40).map(|col| buf[(col, 3)].symbol().to_string()).collect();
+
+        assert!(row1.contains("line one"), "first line missing. got: {}", row1.trim());
+        assert!(row2.contains("line two"), "second line missing. got: {}", row2.trim());
+        assert!(row3.contains("line three"), "third line missing. got: {}", row3.trim());
+    }
+}

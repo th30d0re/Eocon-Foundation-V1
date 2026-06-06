@@ -223,8 +223,270 @@ detect_scheme() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Context Cache Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Directory for cached context (shared across agents)
+CONTEXT_CACHE_DIR="${ARTIFACTS_DIR:-./Artifacts}/.context_cache"
+
+# Compute a cache key from an array of paths plus an optional prompt/settings string
+# Usage: compute_context_key "prompt_or_settings" "${paths[@]}"
+compute_context_key() {
+    local settings="$1"
+    shift
+    local paths=("$@")
+    local key_input=""
+
+    for p in "${paths[@]}"; do
+        key_input+="${p}:"
+    done
+    key_input+="|${settings}"
+
+    # Use md5 or shasum for hash
+    if command -v md5 >/dev/null 2>&1; then
+        echo "$key_input" | md5
+    elif command -v md5sum >/dev/null 2>&1; then
+        echo "$key_input" | md5sum | awk '{print $1}'
+    else
+        # Fallback: use key directly (less safe but functional)
+        echo "$key_input" | tr -dc '[:alnum:]._-' | head -c 64
+    fi
+}
+
+# Compute a stable hash of a prompt string for state tracking
+# Usage: compute_prompt_hash "prompt text"
+compute_prompt_hash() {
+    local prompt="$1"
+    if command -v md5 >/dev/null 2>&1; then
+        echo "$prompt" | md5
+    elif command -v md5sum >/dev/null 2>&1; then
+        echo "$prompt" | md5sum | awk '{print $1}'
+    else
+        # Fallback: truncate and sanitize
+        echo "$prompt" | tr -dc '[:alnum:]._-' | head -c 64
+    fi
+}
+
+# Save gathered context to disk cache with manifest of source file mtimes
+# Usage: save_context_cache <key> <context> "${paths[@]}"
+save_context_cache() {
+    local key="$1"
+    local context="$2"
+    shift 2
+    local paths=("$@")
+
+    mkdir -p "$CONTEXT_CACHE_DIR"
+
+    echo "$context" > "${CONTEXT_CACHE_DIR}/context.txt"
+    echo "$key" > "${CONTEXT_CACHE_DIR}/key.txt"
+
+    # Write manifest: type|path|mtime|size
+    local manifest="${CONTEXT_CACHE_DIR}/manifest.txt"
+    > "$manifest"
+    for p in "${paths[@]}"; do
+        if [ -f "$p" ]; then
+            local mtime size
+            mtime=$(stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo "0")
+            size=$(stat -f %z "$p" 2>/dev/null || stat -c %s "$p" 2>/dev/null || echo "0")
+            echo "F|${p}|${mtime}|${size}" >> "$manifest"
+        elif [ -d "$p" ]; then
+            # For directories, track the newest mtime of any .md file up to 2 levels
+            local latest_mtime
+            latest_mtime=$(find "$p" -maxdepth 2 -name "*.md" -type f -exec stat -f %m {} + 2>/dev/null | sort -rn | head -1 || echo "0")
+            echo "D|${p}|${latest_mtime}|0" >> "$manifest"
+        fi
+    done
+
+    log_verbose "Context cached to ${CONTEXT_CACHE_DIR}"
+}
+
+# Load cached context if key and all mtimes match
+# Usage: load_context_cache <key> "${paths[@]}"
+# Returns: 0 + echoes context if valid, 1 if stale/missing
+load_context_cache() {
+    local key="$1"
+    shift
+    local paths=("$@")
+
+    local context_file="${CONTEXT_CACHE_DIR}/context.txt"
+    local key_file="${CONTEXT_CACHE_DIR}/key.txt"
+    local manifest="${CONTEXT_CACHE_DIR}/manifest.txt"
+
+    if [ ! -f "$context_file" ] || [ ! -f "$key_file" ] || [ ! -f "$manifest" ]; then
+        return 1
+    fi
+
+    local cached_key
+    cached_key=$(cat "$key_file" 2>/dev/null || echo "")
+    if [ "$cached_key" != "$key" ]; then
+        log_verbose "Context cache key mismatch, regathering..."
+        return 1
+    fi
+
+    # Validate manifest entries
+    while IFS='|' read -r type path mtime size; do
+        if [ "$type" = "F" ]; then
+            if [ ! -f "$path" ]; then
+                log_verbose "Context cache stale: missing file $path"
+                return 1
+            fi
+            local current_mtime current_size
+            current_mtime=$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo "0")
+            current_size=$(stat -f %z "$path" 2>/dev/null || stat -c %s "$path" 2>/dev/null || echo "0")
+            if [ "$current_mtime" != "$mtime" ] || [ "$current_size" != "$size" ]; then
+                log_verbose "Context cache stale: modified file $path"
+                return 1
+            fi
+        elif [ "$type" = "D" ]; then
+            if [ ! -d "$path" ]; then
+                log_verbose "Context cache stale: missing directory $path"
+                return 1
+            fi
+            local current_mtime
+            current_mtime=$(find "$path" -maxdepth 2 -name "*.md" -type f -exec stat -f %m {} + 2>/dev/null | sort -rn | head -1 || echo "0")
+            if [ "$current_mtime" != "$mtime" ]; then
+                log_verbose "Context cache stale: modified directory $path"
+                return 1
+            fi
+        fi
+    done < "$manifest"
+
+    log_info "Using cached context (${#paths[@]} source(s) unchanged)"
+    cat "$context_file"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Simulator Detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Detect the best available iPhone simulator for a given scheme.
+# Queries xcodebuild -showdestinations and returns the first non-placeholder
+# iPhone simulator name. Falls back to generic destination.
+# Usage: detect_available_simulator [scheme] [project] [workspace]
+detect_available_simulator() {
+    local scheme="${1:-}"
+    local project="${2:-}"
+    local workspace="${3:-}"
+
+    local cmd_args=("xcodebuild")
+    if [ -n "$workspace" ]; then
+        cmd_args+=("-workspace" "$workspace")
+    elif [ -n "$project" ]; then
+        cmd_args+=("-project" "$project")
+    fi
+
+    if [ -n "$scheme" ]; then
+        cmd_args+=("-scheme" "$scheme")
+    fi
+
+    if [ ${#cmd_args[@]} -gt 1 ]; then
+        local destinations
+        destinations=$("${cmd_args[@]}" -showdestinations 2>/dev/null | grep "platform:iOS Simulator" | grep "name:iPhone" | grep -v "placeholder")
+        # Prefer Pro Max, then Pro, then any iPhone
+        local available_sim
+        available_sim=$(echo "$destinations" | grep "Pro Max" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        if [ -z "$available_sim" ]; then
+            available_sim=$(echo "$destinations" | grep "Pro" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        fi
+        if [ -z "$available_sim" ]; then
+            available_sim=$(echo "$destinations" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        fi
+        if [ -n "$available_sim" ]; then
+            echo "$available_sim"
+            return 0
+        fi
+    fi
+
+    # Fallback: use xcrun simctl — prefer Pro Max, then Pro, then standard
+    local simctl_json
+    simctl_json=$(xcrun simctl list devices available -j 2>/dev/null)
+    # 1. Try Pro Max first (latest)
+    local fallback_sim
+    fallback_sim=$(echo "$simctl_json" | jq -r '.devices | to_entries[] | .value[] | select(.name | test("^iPhone [0-9]+ Pro Max$")) | .name' | sort -V | tail -1)
+    # 2. Try Pro
+    if [ -z "$fallback_sim" ]; then
+        fallback_sim=$(echo "$simctl_json" | jq -r '.devices | to_entries[] | .value[] | select(.name | test("^iPhone [0-9]+ Pro$")) | .name' | sort -V | tail -1)
+    fi
+    # 3. Try standard iPhone
+    if [ -z "$fallback_sim" ]; then
+        fallback_sim=$(echo "$simctl_json" | jq -r '.devices | to_entries[] | .value[] | select(.name | test("^iPhone [0-9]+$")) | .name' | sort -V | tail -1)
+    fi
+    # 4. Try Plus / Air / SE / any iPhone
+    if [ -z "$fallback_sim" ]; then
+        fallback_sim=$(echo "$simctl_json" | jq -r '.devices | to_entries[] | .value[] | select(.name | test("^iPhone")) | .name' | sort -V | tail -1)
+    fi
+    if [ -n "$fallback_sim" ]; then
+        echo "$fallback_sim"
+        return 0
+    fi
+
+    echo ""
+    return 1
+}
+
 # Context Gathering Functions
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Offer user a chance to skip context gathering before it starts
+# Usage: prompt_skip_context <description>
+# Returns: 0 if user chose to skip, 1 otherwise
+prompt_skip_context() {
+    local description="${1:-context gathering}"
+
+    # Only prompt if running interactively
+    if [ ! -t 0 ]; then
+        return 1
+    fi
+
+    # Respect env flag to disable prompt (for CI/automation)
+    if [ "${SKIP_CONTEXT_PROMPT:-false}" = "true" ]; then
+        return 1
+    fi
+
+    local timeout_secs=3
+    local spin_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    local spin_len=${#spin_chars}
+    echo "" >&2
+    log_info "$description starting..."
+
+    (
+        local elapsed=0
+        local spin_idx=0
+        while [ $elapsed -lt $timeout_secs ]; do
+            local spin_char="${spin_chars:spin_idx:1}"
+            local remaining=$((timeout_secs - elapsed))
+            printf "\r\033[K\033[36m[%s]\033[0m Press \033[1m's'\033[0m to skip %s (%ds left)" "$spin_char" "$description" "$remaining" >&2
+            spin_idx=$(((spin_idx + 1) % spin_len))
+            sleep 0.15
+            local _tmp=$((elapsed * 100 + 15))
+            if [ "$_tmp" -ge $(((elapsed + 1) * 100)) ]; then
+                elapsed=$((elapsed + 1))
+            fi
+        done
+        printf "\r\033[K" >&2
+    ) &
+    local spinner_pid=$!
+
+    local key=""
+    if IFS= read -rs -t $timeout_secs -n 1 key 2>/dev/null; then
+        kill "$spinner_pid" 2>/dev/null
+        wait "$spinner_pid" 2>/dev/null
+        printf "\r\033[K" >&2
+        if [ "$key" = "s" ] || [ "$key" = "S" ]; then
+            echo "" >&2
+            log_info "Skipping $description"
+            echo "" >&2
+            return 0
+        fi
+    fi
+
+    kill "$spinner_pid" 2>/dev/null
+    wait "$spinner_pid" 2>/dev/null
+    printf "\r\033[K" >&2
+    echo "" >&2
+    return 1
+}
 
 # Read all MD files from a directory (up to 2 levels deep)
 read_md_files_from_dir() {
@@ -249,18 +511,46 @@ $(cat "$md_file")
 }
 
 # Gather test context from specified paths
-# Usage: gather_test_context "${CONTEXT_PATHS[@]}"
+# Usage: gather_test_context [--cache-key <key>] "${CONTEXT_PATHS[@]}"
 # Returns: Aggregated context string
+# If --cache-key is provided, checks disk cache first and saves after gathering.
 gather_test_context() {
-    local context=""
-    local paths=("$@")
+    local cache_key=""
+    local paths=()
+
+    # Parse optional --cache-key
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cache-key)
+                cache_key="$2"
+                shift 2
+                ;;
+            *)
+                paths+=("$1")
+                shift
+                ;;
+        esac
+    done
 
     if [ ${#paths[@]} -eq 0 ]; then
         return
     fi
 
+    # Offer user chance to skip
+    if prompt_skip_context "Context gathering"; then
+        return
+    fi
+
+    # Try cache first
+    if [ -n "$cache_key" ]; then
+        if load_context_cache "$cache_key" "${paths[@]}"; then
+            return 0
+        fi
+    fi
+
     log_verbose "Gathering context from ${#paths[@]} paths..."
 
+    local context=""
     for ctx_path in "${paths[@]}"; do
         if [ -f "$ctx_path" ]; then
             log_verbose "Adding context file: $ctx_path"
@@ -284,6 +574,11 @@ $dir_content
             log_verbose "Context path not found: $ctx_path"
         fi
     done
+
+    # Save to cache
+    if [ -n "$cache_key" ]; then
+        save_context_cache "$cache_key" "$context" "${paths[@]}"
+    fi
 
     echo "$context"
 }
@@ -495,6 +790,14 @@ run_ai_cli() {
                 return 1
             fi
             ;;
+        kimi|kimi-code|moonshot)
+            if command -v kimi >/dev/null 2>&1; then
+                ai_cmd="kimi"
+            else
+                log_error "Kimi CLI not found"
+                return 1
+            fi
+            ;;
         *)
             log_error "Unknown AI provider: $ai_provider"
             return 1
@@ -529,6 +832,23 @@ run_ai_cli() {
             [ "$yolo_mode" = "true" ] && letta_flags="--yolo"
             ai_cmd_full="cat \"$prompt_file\" | $ai_cmd $letta_flags -p"
             ;;
+        kimi|kimi-code|moonshot)
+            # Use stream-json to avoid Rich markup parsing issues with brackets in prompts
+            local kimi_mcp_config
+            kimi_mcp_config=$(mktemp /tmp/kimi_mcp_empty.XXXXXX)
+            echo '{"mcpServers":{}}' > "$kimi_mcp_config"
+            local kimi_flags="--yolo --print --output-format stream-json --mcp-config-file \"$kimi_mcp_config\""
+            if [ -n "${ai_model:-}" ]; then
+                kimi_flags="$kimi_flags --model \"$ai_model\""
+            fi
+            if command -v jq &>/dev/null; then
+                ai_cmd_full="cat \"$prompt_file\" | $ai_cmd $kimi_flags 2>&1 | grep '^\\s*{' | jq -r 'select(.role==\"assistant\") | .content[]? | select(.type==\"text\") | .text'"
+            else
+                ai_cmd_full="cat \"$prompt_file\" | $ai_cmd $kimi_flags"
+            fi
+            # Schedule cleanup of temp MCP config after eval
+            ai_cmd_full="$ai_cmd_full; rm -f \"$kimi_mcp_config\""
+            ;;
     esac
 
     log_verbose "Running AI CLI: $ai_provider"
@@ -557,6 +877,52 @@ run_ai_cli() {
     fi
 
     return $ai_exit_code
+}
+
+# Extract Swift code from AI markdown output
+# Tries ```swift fences first, then plain ``` fences, then falls back to raw minus fences.
+# Returns empty string and exit 1 if no Swift syntax markers are detected (prose-only).
+# Usage: extract_swift_code "<raw_ai_output>"
+extract_swift_code() {
+    local raw="$1"
+    local extracted=""
+
+    # 1. Try ```swift blocks (case-insensitive, optional trailing whitespace)
+    extracted=$(echo "$raw" | awk 'tolower($0) ~ /^```swift\s*$/{flag=1;next}/^```\s*$/{flag=0;next}flag')
+
+    # 2. If empty, try plain ``` blocks (first pair only)
+    if [ -z "$extracted" ]; then
+        extracted=$(echo "$raw" | awk '/^```\s*$/{if(!started){started=1;flag=1;next}else{flag=0;next}}flag')
+    fi
+
+    # 3. If still empty, fall back to raw with fence lines removed
+    if [ -z "$extracted" ]; then
+        extracted=$(echo "$raw" | sed -E '/^```(swift)?\s*$/d')
+    fi
+
+    # 4. Validate: must contain actual Swift syntax markers
+    # Look for at least one of: import, class, struct, enum, func, extension, protocol, @Test, @MainActor
+    if ! echo "$extracted" | grep -qiE '^[[:space:]]*(import|class|struct|enum|func|extension|protocol|@)' ; then
+        echo ""
+        return 1
+    fi
+
+    # 5. Validate: must NOT be truncated (look for placeholder patterns)
+    if echo "$extracted" | grep -qE '^[[:space:]]*//+[[:space:]]*\.\.\.|//+[[:space:]]*full (test )?suite|//+[[:space:]]*remaining|//+[[:space:]]*continued|//+[[:space:]]*truncated' ; then
+        echo ""
+        return 1
+    fi
+
+    # 6. Validate: first non-empty line should start with import, @, class, struct, enum, or extension
+    local first_line
+    first_line=$(echo "$extracted" | sed '/^[[:space:]]*$/d' | head -n 1)
+    if ! echo "$first_line" | grep -qiE '^[[:space:]]*(import|@|class|struct|enum|extension)' ; then
+        echo ""
+        return 1
+    fi
+
+    echo "$extracted"
+    return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -645,7 +1011,7 @@ EOF
 {
     "title": "${title}",
     "timestamp": "${timestamp}",
-    "data": ${data:-{}}
+    "data": $(if [ -n "${data:-}" ]; then echo "$data"; else echo "{}"; fi)
 }
 EOF
             ;;
@@ -831,11 +1197,14 @@ find_swift_source_files() {
         -not -path "*/Carthage/*" \
         -not -path "*/checkouts/*" \
         -not -path "*/DerivedData/*" \
+        -not -path "*/Docs/*" \
+        -not -path "*/docs/*" \
+        -not -path "*/Artifacts/*" \
         -not -path "*Tests/*" \
         -not -path "*Test/*" \
         -not -name "*Tests.swift" \
         -not -name "*Test.swift" \
-        2>/dev/null | sort
+        2>/dev/null | sort -u
 }
 
 # Find Swift test files
@@ -933,7 +1302,464 @@ export -f write_error_log
 export -f write_success_log
 export -f validate_flow_json
 export -f find_swift_source_files
+# ─────────────────────────────────────────────────────────────────────────────
+# Build Agent State Persistence (prompt completion tracking)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# State file location: Artifacts/.build_state/completed_prompts.jsonl
+_BUILD_STATE_DIR="${ARTIFACTS_DIR:-./Artifacts}/.build_state"
+_COMPLETED_PROMPTS_FILE="$_BUILD_STATE_DIR/completed_prompts.jsonl"
+
+# Compute a stable hash for a prompt string
+compute_prompt_hash() {
+    local input="$1"
+    if [ -z "$input" ]; then
+        echo ""
+        return 0
+    fi
+    # Normalize: trim leading/trailing whitespace, collapse whitespace
+    local normalized
+    normalized=$(echo "$input" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -s '[:space:]')
+    printf '%s' "$normalized" | md5 2>/dev/null || printf '%s' "$normalized" | md5sum 2>/dev/null | awk '{print $1}' || echo ""
+}
+
+# Check if a prompt was already completed successfully
+check_prompt_already_done() {
+    local input="$1"
+    if [ -z "$input" ]; then
+        return 1  # Not done (no prompt)
+    fi
+    if [ ! -f "$_COMPLETED_PROMPTS_FILE" ]; then
+        return 1  # Not done (no state file)
+    fi
+
+    local hash
+    hash=$(compute_prompt_hash "$input")
+    if [ -z "$hash" ]; then
+        return 1
+    fi
+
+    # Check if hash exists in state file
+    grep -q "\"hash\":\"$hash\"" "$_COMPLETED_PROMPTS_FILE" 2>/dev/null
+}
+
+# Mark a prompt as completed
+save_prompt_completion() {
+    local input="$1"
+    local plan_ref="${2:-}"
+    local metadata="${3:-{}}"
+
+    if [ -z "$input" ]; then
+        return 0  # Nothing to save
+    fi
+
+    local hash
+    hash=$(compute_prompt_hash "$input")
+    if [ -z "$hash" ]; then
+        return 1
+    fi
+
+    mkdir -p "$_BUILD_STATE_DIR"
+
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Append a JSON line (JSONL format)
+    printf '{"hash":"%s","completed_at":"%s","plan_ref":"%s","metadata":%s}\n' \
+        "$hash" "$timestamp" "$plan_ref" "$metadata" >> "$_COMPLETED_PROMPTS_FILE"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider Selection via Multi-Armed Bandit Algorithms
+# Based on: Kochenderfer et al., "Algorithms for Decision Making", Ch.15
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROVIDER_SCOREBOARD="${ARTIFACTS_DIR:-./Artifacts}/.provider_scoreboard.json"
+
+# Beta prior parameters (uniform prior = Beta(1,1))
+_PROVIDER_BETA_PRIOR_ALPHA=1
+_PROVIDER_BETA_PRIOR_BETA=1
+
+# Initialize scoreboard with all available providers.
+# If file exists, ensure all discovered providers have proper schema defaults.
+_init_provider_scoreboard() {
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+    local providers=()
+    while IFS= read -r p; do
+        [ -n "$p" ] && providers+=("$p")
+    done <<< "$(discover_available_providers)"
+    if [ ${#providers[@]} -eq 0 ]; then
+        return 1
+    fi
+
+    if [ ! -f "$scoreboard" ]; then
+        local entries=""
+        for p in "${providers[@]}"; do
+            [ -n "$entries" ] && entries+=","
+            entries+="\"$p\":{\"successes\":0,\"failures\":0,\"timeouts\":0,\"stalls\":0,\"total_time\":0,\"last_used\":\"\",\"alpha\":${_PROVIDER_BETA_PRIOR_ALPHA},\"beta\":${_PROVIDER_BETA_PRIOR_BETA}}"
+        done
+        mkdir -p "$(dirname "$scoreboard")"
+        echo "{$entries}" > "$scoreboard"
+        return 0
+    fi
+
+    # File exists — ensure all providers have alpha/beta and count fields
+    local tmp_file
+    tmp_file=$(mktemp)
+    cp "$scoreboard" "$tmp_file"
+    for p in "${providers[@]}"; do
+        local tmp2
+        tmp2=$(mktemp)
+        jq --arg p "$p" \
+           --argjson a "${_PROVIDER_BETA_PRIOR_ALPHA}" \
+           --argjson b "${_PROVIDER_BETA_PRIOR_BETA}" \
+           '.[$p].successes     //= 0 |
+            .[$p].failures      //= 0 |
+            .[$p].timeouts      //= 0 |
+            .[$p].stalls        //= 0 |
+            .[$p].total_time    //= 0 |
+            .[$p].alpha         //= $a |
+            .[$p].beta          //= $b' \
+           "$tmp_file" > "$tmp2" 2>/dev/null || cp "$tmp_file" "$tmp2"
+        mv "$tmp2" "$tmp_file"
+    done
+    mv "$tmp_file" "$scoreboard"
+}
+
+# Record result for a provider.
+# Results map to reward values per the textbook's binary bandit framework,
+# extended with partial rewards for timeout/stall (provider works but is slow).
+#   success  -> r=1.0  (full reward)
+#   stall    -> r=0.5  (partial — provider responded but was very slow)
+#   timeout  -> r=0.25 (partial — provider failed to respond in time)
+#   failure  -> r=0.0  (full penalty — provider responded with bad output)
+# The Beta posterior is updated: Beta(α + r, β + (1-r))
+record_provider_result() {
+    local provider="$1"
+    local result="$2"   # "success" | "failure" | "timeout" | "stall"
+    local duration="${3:-0}"
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+
+    if [ ! -f "$scoreboard" ]; then
+        _init_provider_scoreboard || return 1
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    case "$result" in
+        success)
+            jq --arg p "$provider" --argjson d "$duration" \
+               '.[$p].successes += 1 | .[$p].total_time += $d | .[$p].last_used = now | .[$p].alpha += 1.0 | .[$p].beta += 0.0' \
+               "$scoreboard" > "$tmp_file" 2>/dev/null || cat "$scoreboard" > "$tmp_file"
+            ;;
+        stall)
+            jq --arg p "$provider" --argjson d "$duration" \
+               '.[$p].stalls += 1 | .[$p].total_time += $d | .[$p].last_used = now | .[$p].alpha += 0.5 | .[$p].beta += 0.5' \
+               "$scoreboard" > "$tmp_file" 2>/dev/null || cat "$scoreboard" > "$tmp_file"
+            ;;
+        timeout)
+            jq --arg p "$provider" --argjson d "$duration" \
+               '.[$p].timeouts += 1 | .[$p].total_time += $d | .[$p].last_used = now | .[$p].alpha += 0.25 | .[$p].beta += 0.75' \
+               "$scoreboard" > "$tmp_file" 2>/dev/null || cat "$scoreboard" > "$tmp_file"
+            ;;
+        failure)
+            jq --arg p "$provider" --argjson d "$duration" \
+               '.[$p].failures += 1 | .[$p].total_time += $d | .[$p].last_used = now | .[$p].alpha += 0.0 | .[$p].beta += 1.0' \
+               "$scoreboard" > "$tmp_file" 2>/dev/null || cat "$scoreboard" > "$tmp_file"
+            ;;
+        *)
+            cat "$scoreboard" > "$tmp_file"
+            ;;
+    esac
+
+    mv "$tmp_file" "$scoreboard"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UCB1 Provider Selection (Algorithm 15.7)
+# Uses Beta posterior parameters as pseudocounts for N(a), as suggested
+# in the textbook: "we can adapt it to the Bayesian context by having N(a)
+# be the sum of the beta distribution parameters associated with a."
+# ─────────────────────────────────────────────────────────────────────────────
+select_provider_ucb1() {
+    local explore_factor="${1:-0.5}"
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+
+    if [ ! -f "$scoreboard" ]; then
+        _init_provider_scoreboard || return 1
+    fi
+
+    local best_provider=""
+    local best_score=-1
+
+    while IFS= read -r line; do
+        local provider="${line%%$'\t'*}"
+        local stats="${line#*$'\t'}"
+        local alpha=$(echo "$stats" | jq '.alpha // 1')
+        local beta=$(echo "$stats" | jq '.beta // 1')
+        local pulls=$(awk "BEGIN {print $alpha + $beta - ${_PROVIDER_BETA_PRIOR_ALPHA} - ${_PROVIDER_BETA_PRIOR_BETA}}")
+
+        if [ "$(awk "BEGIN {print ($pulls < 1) ? 1 : 0}")" -eq 1 ]; then
+            # Unexplored or minimally explored — prioritize discovery
+            echo "$provider"
+            return 0
+        fi
+
+        local mean_reward
+        mean_reward=$(awk "BEGIN {print ($alpha - ${_PROVIDER_BETA_PRIOR_ALPHA}) / $pulls}")
+
+        # Total pseudocounts across all providers
+        local total_pulls
+        total_pulls=$(jq '[.[] | (.alpha + .beta)] | add' "$scoreboard")
+        if [ -z "$total_pulls" ] || [ "$total_pulls" = "0" ] || [ "$total_pulls" = "null" ]; then
+            total_pulls=2
+        fi
+
+        local na
+        na=$(awk "BEGIN {print $alpha + $beta - ${_PROVIDER_BETA_PRIOR_ALPHA} - ${_PROVIDER_BETA_PRIOR_BETA}}")
+        if [ "$(awk "BEGIN {print ($na < 1) ? 1 : 0}")" -eq 1 ]; then
+            na=1
+        fi
+
+        local ucb
+        ucb=$(awk -v mean="$mean_reward" -v total="$total_pulls" -v na="$na" -v c="$explore_factor" \
+              'BEGIN {print mean + c * sqrt(log(total) / na)}')
+
+        if [ "$best_score" = "-1" ] || [ "$(awk -v a="$ucb" -v b="$best_score" 'BEGIN {print (a > b) ? 1 : 0}')" -eq 1 ]; then
+            best_score="$ucb"
+            best_provider="$provider"
+        fi
+    done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$scoreboard" 2>/dev/null)"
+
+    if [ -n "$best_provider" ]; then
+        echo "$best_provider"
+    else
+        discover_available_providers | head -1
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Thompson Sampling (Posterior Sampling) Provider Selection (Algorithm 15.8)
+# "Simple to implement and does not require careful parameter tuning."
+# Sample from each provider's Beta posterior, pick the one with max sample.
+# More robust than UCB1 for small sample sizes.
+# ─────────────────────────────────────────────────────────────────────────────
+select_provider_thompson() {
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+
+    if [ ! -f "$scoreboard" ]; then
+        _init_provider_scoreboard || return 1
+    fi
+
+    local best_provider=""
+    local best_sample=-1
+
+    while IFS= read -r line; do
+        local provider="${line%%$'\t'*}"
+        local stats="${line#*$'\t'}"
+        local alpha=$(echo "$stats" | jq '.alpha // 1')
+        local beta=$(echo "$stats" | jq '.beta // 1')
+
+        # Sample from Beta(α, β) using the Gamma ratio method.
+        # On macOS / POSIX: use python3 for reliable Beta sampling.
+        local sample
+        if command -v python3 >/dev/null 2>&1; then
+            sample=$(python3 -c "import random; random.seed(); print(random.betavariate($alpha, $beta))")
+        else
+            # Fallback: use mean (degrades to greedy, but functional)
+            sample=$(awk "BEGIN {print $alpha / ($alpha + $beta)}")
+        fi
+
+        if [ "$best_sample" = "-1" ] || [ "$(awk -v a="$sample" -v b="$best_sample" 'BEGIN {print (a > b) ? 1 : 0}')" -eq 1 ]; then
+            best_sample="$sample"
+            best_provider="$provider"
+        fi
+    done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$scoreboard" 2>/dev/null)"
+
+    if [ -n "$best_provider" ]; then
+        echo "$best_provider"
+    else
+        discover_available_providers | head -1
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Epsilon-Greedy with Exponential Decay (Algorithm 15.3 + eq 15.2)
+# ε ← α·ε  after each pull.  Starts with more exploration, decays over time.
+# The textbook: "maintains a constant amount of exploration, despite there
+# being far more uncertainty earlier... One common adjustment is to decay ε."
+# ─────────────────────────────────────────────────────────────────────────────
+select_provider_epsilon_greedy() {
+    local epsilon="${1:-0.3}"
+    local decay="${2:-0.95}"
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+
+    if [ ! -f "$scoreboard" ]; then
+        _init_provider_scoreboard || return 1
+    fi
+
+    # Compute current ε based on total pulls so far
+    local total_pulls
+    total_pulls=$(jq '[.[] | (.successes + .failures + .timeouts + .stalls)] | add' "$scoreboard")
+    if [ -z "$total_pulls" ] || [ "$total_pulls" = "0" ] || [ "$total_pulls" = "null" ]; then
+        total_pulls=0
+    fi
+
+    # Apply decay: ε_current = ε · α^total_pulls
+    local current_epsilon
+    current_epsilon=$(awk -v e="$epsilon" -v d="$decay" -v n="$total_pulls" \
+                      'BEGIN {print e * (d ^ n)}')
+
+    # Decide: explore or exploit?
+    local roll
+    roll=$(awk 'BEGIN {srand(); print rand()}')
+
+    if [ "$(awk -v r="$roll" -v e="$current_epsilon" 'BEGIN {print (r < e) ? 1 : 0}')" -eq 1 ]; then
+        # Explore: pick uniformly at random from available providers
+        local providers=()
+        while IFS= read -r p; do
+            [ -n "$p" ] && providers+=("$p")
+        done <<< "$(jq -r 'keys[]' "$scoreboard" 2>/dev/null)"
+        if [ ${#providers[@]} -gt 0 ]; then
+            local idx
+            idx=$(awk -v n="${#providers[@]}" 'BEGIN {srand(); print int(rand() * n)}')
+            echo "${providers[$idx]}"
+            return 0
+        fi
+    fi
+
+    # Exploit: pick provider with highest mean reward (posterior mean)
+    local best_provider=""
+    local best_mean=-1
+
+    while IFS= read -r line; do
+        local provider="${line%%$'\t'*}"
+        local stats="${line#*$'\t'}"
+        local alpha=$(echo "$stats" | jq '.alpha // 1')
+        local beta=$(echo "$stats" | jq '.beta // 1')
+        local mean
+        mean=$(awk "BEGIN {print $alpha / ($alpha + $beta)}")
+
+        if [ "$best_mean" = "-1" ] || [ "$(awk -v a="$mean" -v b="$best_mean" 'BEGIN {print (a > b) ? 1 : 0}')" -eq 1 ]; then
+            best_mean="$mean"
+            best_provider="$provider"
+        fi
+    done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$scoreboard" 2>/dev/null)"
+
+    if [ -n "$best_provider" ]; then
+        echo "$best_provider"
+    else
+        discover_available_providers | head -1
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Explore-Then-Commit (Algorithm 15.4)
+# Uniform random for first k pulls per provider, then commit to best.
+# Ideal for cold-start when no data exists.
+# ─────────────────────────────────────────────────────────────────────────────
+select_provider_explore_then_commit() {
+    local k="${1:-2}"
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+
+    if [ ! -f "$scoreboard" ]; then
+        _init_provider_scoreboard || return 1
+    fi
+
+    # Check if any provider is still in exploration phase (< k pulls)
+    local explore_candidates=()
+    while IFS= read -r line; do
+        local provider="${line%%$'\t'*}"
+        local stats="${line#*$'\t'}"
+        local pulls=$(echo "$stats" | jq '(.successes + .failures + .timeouts + .stalls) // 0')
+        if [ "$pulls" -lt "$k" ]; then
+            explore_candidates+=("$provider")
+        fi
+    done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$scoreboard" 2>/dev/null)"
+
+    if [ ${#explore_candidates[@]} -gt 0 ]; then
+        # Randomly pick from candidates still needing exploration
+        local idx
+        idx=$(awk -v n="${#explore_candidates[@]}" 'BEGIN {srand(); print int(rand() * n)}')
+        echo "${explore_candidates[$idx]}"
+        return 0
+    fi
+
+    # Commit: pick provider with highest posterior mean
+    local best_provider=""
+    local best_mean=-1
+
+    while IFS= read -r line; do
+        local provider="${line%%$'\t'*}"
+        local stats="${line#*$'\t'}"
+        local alpha=$(echo "$stats" | jq '.alpha // 1')
+        local beta=$(echo "$stats" | jq '.beta // 1')
+        local mean
+        mean=$(awk "BEGIN {print $alpha / ($alpha + $beta)}")
+
+        if [ "$best_mean" = "-1" ] || [ "$(awk -v a="$mean" -v b="$best_mean" 'BEGIN {print (a > b) ? 1 : 0}')" -eq 1 ]; then
+            best_mean="$mean"
+            best_provider="$provider"
+        fi
+    done <<< "$(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$scoreboard" 2>/dev/null)"
+
+    if [ -n "$best_provider" ]; then
+        echo "$best_provider"
+    else
+        discover_available_providers | head -1
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-select provider strategy based on data richness.
+# Cold-start (< k pulls total)    -> explore-then-commit
+# Sparse data (< 10 pulls total)  -> thompson sampling (robust, no tuning)
+# Rich data (≥ 10 pulls total)    -> ucb1 with small c (exploits knowledge)
+# ─────────────────────────────────────────────────────────────────────────────
+select_provider_auto() {
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+
+    if [ ! -f "$scoreboard" ]; then
+        _init_provider_scoreboard || return 1
+    fi
+
+    local total_pulls
+    total_pulls=$(jq '[.[] | (.successes + .failures + .timeouts + .stalls)] | add' "$scoreboard")
+    if [ -z "$total_pulls" ] || [ "$total_pulls" = "0" ] || [ "$total_pulls" = "null" ]; then
+        total_pulls=0
+    fi
+
+    if [ "$total_pulls" -lt 4 ]; then
+        select_provider_explore_then_commit 2
+    elif [ "$total_pulls" -lt 12 ]; then
+        select_provider_thompson
+    else
+        select_provider_ucb1 0.5
+    fi
+}
+
+# Get provider stats summary (for logging)
+get_provider_stats() {
+    local scoreboard="${_PROVIDER_SCOREBOARD}"
+    if [ ! -f "$scoreboard" ]; then
+        echo "No provider stats available"
+        return 0
+    fi
+    jq -r 'to_entries | map("\(.key): succ=\(.value.successes) fail=\(.value.failures) to=\(.value.timeouts) stall=\(.value.stalls) | post=Beta(\(.value.alpha * 100 | floor | . / 100),\(.value.beta * 100 | floor | . / 100)) | avg_time=\(if .value.total_time > 0 then (.value.total_time / (.value.successes + .value.failures + .value.timeouts + .value.stalls) | floor) else 0 end)s") | .[]' "$scoreboard" 2>/dev/null || echo "Stats unavailable"
+}
+
 export -f find_swift_test_files
 export -f find_swiftui_views
 export -f detect_test_target_dir
+export -f compute_prompt_hash
+export -f check_prompt_already_done
+export -f save_prompt_completion
 export -f detect_ui_test_target_dir
+export -f record_provider_result
+export -f select_provider_ucb1
+export -f select_provider_thompson
+export -f select_provider_epsilon_greedy
+export -f select_provider_explore_then_commit
+export -f select_provider_auto
+export -f get_provider_stats

@@ -83,7 +83,7 @@ OPTIONS:
     --feature <name>        Focus on specific feature/module
     --output <path>         Output file path (default: flows.json in artifacts)
     --format <type>         Output format: json (default) or markdown
-    --ai-provider <name>    AI provider: cursor, claude, codex, gemini, aider, letta
+    --ai-provider <name>    AI provider: cursor, claude, codex, gemini, aider, letta, kimi
     --artifacts-dir <path>  Output directory for artifacts
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
@@ -442,8 +442,15 @@ generate_flows() {
     local flows_json
     flows_json=$(cat "$ai_output_file")
 
-    # Clean up (remove markdown code blocks if present)
-    flows_json=$(echo "$flows_json" | sed '/^```json$/d' | sed '/^```$/d')
+    # Extract content inside ```json ... ``` fences, discarding prose outside
+    local extracted_json
+    extracted_json=$(echo "$flows_json" | awk '/^```json$/{flag=1;next}/^```$/{flag=0;next}flag')
+    if [ -n "$extracted_json" ]; then
+        flows_json="$extracted_json"
+    else
+        # No fenced blocks found; just remove fence lines as fallback
+        flows_json=$(echo "$flows_json" | sed '/^```json$/d' | sed '/^```$/d')
+    fi
 
     # Validate JSON
     if command -v jq >/dev/null 2>&1; then

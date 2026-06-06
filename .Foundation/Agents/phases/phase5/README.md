@@ -64,6 +64,7 @@ All agents use `#!/usr/bin/env bash` for maximum portability across environments
 |--------|---------|
 | `BuildAgent.sh` | Main orchestrator - generates code via AI CLI and verifies builds |
 | `BuildLint.sh` | Build verification - runs SwiftLint and Xcode builds |
+| `argentRuntimeAgent.sh` | Argent runtime verification agent — executes user flows against the live app on a simulator |
 
 ---
 
@@ -206,6 +207,53 @@ Build verification script that runs SwiftLint and Xcode builds.
 - **📝 Smart Linting**: Only lints uncommitted Swift files (faster CI)
 - **🎯 Deep Project Detection**: Finds Xcode projects up to 5 levels deep
 - **🚫 Dependency Exclusion**: Skips `.build`, `Pods`, `Carthage`, `checkouts` folders
+
+---
+
+## Stage 5b: Argent Runtime Verification
+
+### What It Does
+
+`argentRuntimeAgent.sh` boots a simulator via Argent CLI, installs the just-built `.app` bundle, and executes user flows defined in `flows.json` step-by-step. For each step it resolves the target element, performs the interaction (tap, input, or verify), and captures a screenshot. When all flows finish it writes two summary files consumed downstream by the repair cycle.
+
+### When It Runs
+
+Stage 5b runs automatically after `testRunner` (Stage 5) and before the report stage, whenever **both** of the following conditions are true:
+
+- `--simulator-name` is provided to `testAgent.sh` or `BuildVerify.sh`.
+- The `argent` CLI is available on `PATH`.
+
+If either condition is not met, the stage auto-skips with a warning and the pipeline continues normally (exit code 11).
+
+### How to Skip It
+
+Pass `--skip-argent` to `testAgent.sh` or `BuildVerify.sh` to bypass the stage without removing it from the pipeline:
+
+```bash
+# Skip via testAgent
+./testAgent.sh --scheme MyApp --simulator-name "iPhone 16 Pro" --skip-argent
+
+# Skip via BuildVerify
+./BuildVerify.sh --scheme MyApp --skip-argent
+```
+
+> ⚠️ **Prerequisite**: Run `npx @swmansion/argent init` **once** in your project root before using Stage 5b. Without this step `argent` will not be on PATH and the stage will auto-skip silently.
+
+### Artifacts Produced
+
+| Artifact | Description |
+|----------|-------------|
+| `argent/summary.json` | Per-flow verification results, step counts, and screenshots list |
+| `argent/errors.json` | Structured error file consumed by `BuildAgent.sh --repair-from-errors` |
+| `argent/screens/*.png` | Screenshots captured at each step during flow execution |
+
+### Exit Codes
+
+| Code | Meaning | Pipeline Effect |
+|------|---------|-----------------|
+| 0 | All flows passed | Proceed to report stage |
+| 10 | Verification failed | Triggers `BuildAgent --repair-from-errors` repair cycle |
+| 11 | Misconfiguration (no simulator / argent not on PATH) | Stage skipped with warning; pipeline continues |
 
 ---
 

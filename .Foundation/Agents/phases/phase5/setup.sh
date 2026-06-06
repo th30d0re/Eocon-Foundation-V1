@@ -290,6 +290,149 @@ install_node() {
     fi
 }
 
+install_agents() {
+    log_info "Installing Foundation agents to PATH (/usr/local/bin)..."
+
+    local agents=(
+        BuildAgent.sh
+        BuildLint.sh
+        BuildVerify.sh
+        testAgent.sh
+        testRunner.sh
+        unitTestAgent.sh
+        accessibilityAgent.sh
+        flowAgent.sh
+        uiTestAgent.sh
+        argentRuntimeAgent.sh
+    )
+
+    local install_dir="/usr/local/bin"
+    local installed=0
+    local skipped=0
+    local failed=0
+
+    for agent in "${agents[@]}"; do
+        local src="${SCRIPT_DIR}/${agent}"
+        local dst="${install_dir}/${agent}"
+
+        if [[ ! -f "$src" ]]; then
+            log_warn "  $agent: source not found, skipping"
+            ((skipped++))
+            continue
+        fi
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "  [DRY RUN] Would symlink: $dst -> $src"
+            continue
+        fi
+
+        # Remove stale symlink or file if it points elsewhere
+        if [[ -L "$dst" ]]; then
+            local current_target
+            current_target=$(readlink "$dst")
+            if [[ "$current_target" == "$src" ]]; then
+                log_success "  $agent: already linked"
+                ((skipped++))
+                continue
+            fi
+            sudo rm -f "$dst"
+        fi
+
+        if sudo ln -sf "$src" "$dst"; then
+            log_success "  $agent: linked"
+            ((installed++))
+        else
+            log_error "  $agent: failed to link (check sudo permissions)"
+            ((failed++))
+        fi
+    done
+
+    echo ""
+    if [[ "$DRY_RUN" == "false" ]]; then
+        echo "  Agents: $installed installed, $skipped already up-to-date, $failed failed"
+    fi
+
+    [[ $failed -eq 0 ]] && return 0 || return 1
+}
+
+# Symlink agents to ~/.local/bin with clean names (no sudo, matches BuildAgent/testAgent pattern)
+install_agents_local() {
+    log_info "Installing Foundation agents to PATH (~/.local/bin)..."
+
+    local install_dir="${HOME}/.local/bin"
+    mkdir -p "$install_dir"
+
+    # name_on_path:source_script
+    local agents=(
+        BuildAgent:BuildAgent.sh
+        BuildLint:BuildLint.sh
+        BuildVerify:BuildVerify.sh
+        testAgent:testAgent.sh
+        argentRuntimeAgent:argentRuntimeAgent.sh
+    )
+
+    local installed=0
+    local skipped=0
+    local failed=0
+
+    for entry in "${agents[@]}"; do
+        local name="${entry%%:*}"
+        local script="${entry##*:}"
+        local src="${SCRIPT_DIR}/${script}"
+        local dst="${install_dir}/${name}"
+
+        if [[ ! -f "$src" ]]; then
+            log_warn "  $name: source not found ($script), skipping"
+            ((skipped++))
+            continue
+        fi
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "  [DRY RUN] Would symlink: $dst -> $src"
+            continue
+        fi
+
+        if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
+            log_success "  $name: already linked"
+            ((skipped++))
+            continue
+        fi
+
+        if ln -sf "$src" "$dst"; then
+            log_success "  $name: linked"
+            ((installed++))
+        else
+            log_error "  $name: failed to link"
+            ((failed++))
+        fi
+    done
+
+    echo ""
+    if [[ "$DRY_RUN" == "false" ]]; then
+        echo "  Local agents: $installed installed, $skipped already up-to-date, $failed failed"
+    fi
+
+    [[ $failed -eq 0 ]] && return 0 || return 1
+}
+
+check_agents_on_path() {
+    log_info "Checking agents on PATH..."
+
+    local agents=(BuildAgent testAgent argentRuntimeAgent BuildAgent.sh BuildLint.sh testAgent.sh argentRuntimeAgent.sh)
+    local all_found=true
+
+    for agent in "${agents[@]}"; do
+        if command -v "$agent" &>/dev/null; then
+            log_success "  $agent: $(command -v "$agent")"
+        else
+            log_warn "  $agent: not on PATH"
+            all_found=false
+        fi
+    done
+
+    $all_found && return 0 || return 1
+}
+
 check_xcodebuildmcp() {
     log_info "Checking XcodeBuildMCP..."
 
@@ -389,6 +532,18 @@ run_smoke_tests() {
         ((tests_failed++))
         log_error "session_store.sh: NOT FOUND"
     fi
+
+    # Test 6: Core agents on PATH
+    local path_agents=(BuildAgent testAgent argentRuntimeAgent)
+    for agent in "${path_agents[@]}"; do
+        if command -v "$agent" &>/dev/null; then
+            ((tests_passed++))
+            log_success "$agent on PATH: OK"
+        else
+            ((tests_failed++))
+            log_warn "$agent: not on PATH (run setup.sh to install)"
+        fi
+    done
 
     echo ""
     echo "Smoke tests: $tests_passed passed, $tests_failed issues"
@@ -551,6 +706,22 @@ main() {
                 log_info "Auto-installing XcodeBuildMCP dependencies (non-interactive mode)"
                 install_xcodebuildmcp || true
             fi
+        fi
+    fi
+
+    # Install agents to PATH
+    echo ""
+    install_agents_local || true
+    if ! check_agents_on_path; then
+        if is_interactive; then
+            read -p "Symlink all agents to /usr/local/bin (requires sudo)? [Y/n] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+                install_agents || true
+            fi
+        else
+            log_info "Auto-installing agents to PATH (non-interactive mode)"
+            install_agents || true
         fi
     fi
 

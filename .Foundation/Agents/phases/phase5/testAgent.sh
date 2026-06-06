@@ -10,6 +10,8 @@
 #   3. Flow Analysis
 #   4. UI Test Generation
 #   5. Test Execution
+#   5a. Maestro UI Flow Verification
+#   5b. Argent Runtime Verification (fallback)
 #   6. Report Generation
 #
 # Exit Codes:
@@ -60,6 +62,8 @@ ACCESSIBILITY_AGENT="${SCRIPT_DIR}/accessibilityAgent.sh"
 FLOW_AGENT="${SCRIPT_DIR}/flowAgent.sh"
 UI_TEST_AGENT="${SCRIPT_DIR}/uiTestAgent.sh"
 TEST_RUNNER="${SCRIPT_DIR}/testRunner.sh"
+ARGENT_RUNTIME_AGENT="${SCRIPT_DIR}/argentRuntimeAgent.sh"
+BUILD_AGENT="${SCRIPT_DIR}/BuildAgent.sh"
 
 # Configuration variables
 PROJECT_PATH=""
@@ -90,6 +94,20 @@ SKIP_ACCESSIBILITY="${SKIP_ACCESSIBILITY:-false}"
 SKIP_UI="${SKIP_UI:-false}"
 SKIP_FLOW="${SKIP_FLOW:-false}"
 SKIP_RUN="${SKIP_RUN:-false}"
+SKIP_ARGENT="${SKIP_ARGENT:-false}"
+SKIP_MAESTRO="${SKIP_MAESTRO:-false}"
+DISCOVER_FLOWS="${DISCOVER_FLOWS:-false}"
+LEARN_FLOWS="${LEARN_FLOWS:-false}"
+
+# Argent repair configuration
+MAX_ARGENT_REPAIR_ATTEMPTS="${MAX_ARGENT_REPAIR_ATTEMPTS:-3}"
+
+# Stress test / robustness simulation
+STRESS_TEST="${STRESS_TEST:-false}"
+STRESS_LEVEL="${STRESS_LEVEL:-1}"  # 1=light, 2=moderate, 3=severe
+
+# Happy-path-only mode (skip sad/regression/coverage waves)
+HAPPY_ONLY="${HAPPY_ONLY:-false}"
 
 # Letta Memory integration (set by BuildVerify.sh orchestrator)
 LETTA_MEMORY_AGENT="${LETTA_MEMORY_AGENT:-}"
@@ -104,6 +122,144 @@ PIPELINE_START_TIME=""
 # Stage results
 declare -A STAGE_RESULTS
 declare -A STAGE_DURATIONS
+
+# Per-stage coverage tracking (across runs)
+declare -A STAGE_COVERAGE
+PIPELINE_STATE_FILE=""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline State Persistence (cross-run progress tracking)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Load pipeline state from previous runs
+load_pipeline_state() {
+    if [ -z "$PIPELINE_STATE_FILE" ] || [ ! -f "$PIPELINE_STATE_FILE" ]; then
+        return 0
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        for stage in unit accessibility flow discover ui run maestro argent; do
+            local cov
+            cov=$(jq -r ".stages.\"$stage\".coverage // 0" "$PIPELINE_STATE_FILE" 2>/dev/null || echo "0")
+            STAGE_COVERAGE[$stage]="$cov"
+        done
+    fi
+}
+
+# Save pipeline state for future runs
+save_pipeline_state() {
+    if [ -z "$PIPELINE_STATE_FILE" ]; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$PIPELINE_STATE_FILE")"
+    if command -v jq >/dev/null 2>&1; then
+        local json="{\"updated_at\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",\"stages\":{"
+        local first=true
+        for stage in unit accessibility flow discover ui run maestro argent; do
+            if [ "$first" = true ]; then first=false; else json+=","; fi
+            local cov="${STAGE_COVERAGE[$stage]:-0}"
+            local status="${STAGE_RESULTS[$stage]:-pending}"
+            json+="\"$stage\":{\"coverage\":$cov,\"last_status\":\"$status\"}"
+        done
+        json+="}}"
+        echo "$json" | jq '.' > "$PIPELINE_STATE_FILE"
+    fi
+}
+
+# Pre-stage prompt: short 3-second window to skip BEFORE stage starts.
+# Returns 0 if should skip, 1 if should continue.
+prompt_skip_stage() {
+    local stage="$1"
+    # Skip prompt in non-tty, CI, or when YOLO mode
+    if [ ! -t 0 ] || [ "${SKIP_STAGE_PROMPT:-false}" = "true" ] || [ "$YOLO_MODE" = "true" ]; then
+        return 1
+    fi
+    local current_cov="${STAGE_COVERAGE[$stage]:-0}"
+    echo "" >&2
+    log_info "Stage: $stage (previous coverage: ${current_cov}%)"
+    log_info "Press 's' NOW to skip, or press 's' at any time during the stage to abort"
+
+    local response
+    if IFS= read -rs -t 2 -n 1 response < /dev/tty 2>/dev/null; then
+        if [ "$response" = "s" ] || [ "$response" = "S" ]; then
+            log_warning "Skipping stage: $stage"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Recursively kill a process tree starting from pid.  Uses pgrep -P (macOS).
+kill_stage_tree() {
+    local pid="$1"
+    local signal="${2:-TERM}"
+    local children
+    children=$(pgrep -P "$pid" 2>/dev/null || true)
+    for child in $children; do
+        kill_stage_tree "$child" "$signal"
+    done
+    kill -"$signal" "$pid" 2>/dev/null || true
+}
+
+# Run a stage function with live keyboard skip.
+# The stage runs in a background process group; we poll /dev/tty in the
+# foreground.  If the user presses 's' (or 'S'), we kill the entire stage
+# process tree and treat it as skipped.
+# Usage: run_stage_with_skip <stage_name> <stage_function_name>
+run_stage_with_skip() {
+    local stage="$1"
+    local stage_func="$2"
+
+    # Skip prompt in non-tty, CI, automation mode
+    if [ ! -t 0 ] || [ "${SKIP_STAGE_PROMPT:-false}" = "true" ] || [ "$YOLO_MODE" = "true" ]; then
+        "$stage_func"
+        return $?
+    fi
+
+    local current_cov="${STAGE_COVERAGE[$stage]:-0}"
+    echo "" >&2
+    log_info "Stage: $stage (previous coverage: ${current_cov}%)"
+    echo -e "\033[2m  → Press 's' at any time to skip this stage\033[0m" >&2
+
+    # Run the stage in a subshell with job control so it gets its own PGID.
+    # We can then kill the whole process group.
+    (
+        set -m
+        "$stage_func" &
+        local stage_pid=$!
+
+        # Keyboard poller — runs in the subshell foreground
+        local key=""
+        while kill -0 "$stage_pid" 2>/dev/null; do
+            if IFS= read -rs -t 1 -n 1 key < /dev/tty 2>/dev/null; then
+                if [ "$key" = "s" ] || [ "$key" = "S" ]; then
+                    echo "" >&2
+                    log_warning "Aborting stage: $stage (user pressed 's')"
+                    # Kill process group first, then recursively clean up stragglers
+                    kill -TERM -- -"$stage_pid" 2>/dev/null || true
+                    sleep 0.3
+                    kill_stage_tree "$stage_pid" TERM
+                    sleep 0.3
+                    kill -KILL -- -"$stage_pid" 2>/dev/null || true
+                    kill_stage_tree "$stage_pid" KILL
+                    exit 77   # Special exit code meaning "user skipped"
+                fi
+            fi
+        done
+
+        wait "$stage_pid"
+        exit $?
+    ) &
+    local wrapper_pid=$!
+    wait "$wrapper_pid"
+    local wrapper_exit=$?
+
+    if [ "$wrapper_exit" -eq 77 ]; then
+        update_stage_status "$stage" "skipped" 0 "user skipped mid-run"
+        return 0   # Skipped is not a pipeline failure
+    fi
+
+    return "$wrapper_exit"
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Usage
@@ -125,10 +281,11 @@ OPTIONS:
     --project <path>        Xcode project/workspace (auto-detect if not provided)
     --scheme <name>         Target scheme (auto-detect if not provided)
     --stage <name>          Run specific stage only:
-                            unit, accessibility, flow, ui, run
+                            unit, accessibility, flow, ui, run, maestro, argent
     --resume-from <stage>   Resume pipeline from specific stage
     --ai-provider <name>    AI provider for all agents
     --yolo                  Auto-approve for all agents
+    --skip-stage            Auto-skip all stage prompts (same as SKIP_STAGE_PROMPT=true)
     --record                Enable recording in test runner
     --report-dir <path>     Final report directory
     --artifacts-dir <path>  Artifacts output directory
@@ -137,6 +294,8 @@ OPTIONS:
     --skip-flow             Skip flow analysis
     --skip-ui               Skip UI test generation
     --skip-run              Skip test execution
+    --skip-maestro          Skip Maestro UI flow verification
+    --skip-argent           Skip Argent runtime verification
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
 
@@ -155,6 +314,7 @@ PIPELINE STAGES:
     3. Flow Analysis            Analyze navigation and generate flows
     4. UI Test Generation       Generate XCUITest from flows
     5. Test Execution           Run tests with optional recording
+    5b. Argent Runtime Verification  Boot simulator, install/launch app, run flows via Argent
     6. Report Generation        Create comprehensive HTML report
 
 EXAMPLES:
@@ -189,6 +349,10 @@ OUTPUT:
     ├── flow/               Flow analysis artifacts
     ├── ui_test/            UI test generation artifacts
     ├── TestReports/        Test execution reports
+    ├── argent/             Argent runtime verification artifacts
+    │   ├── screens/        Per-step screenshots
+    │   ├── errors.json     Verification errors (on failure)
+    │   └── summary.json    Argent verification summary
     └── pipeline_report.html Final pipeline summary
 EOF
 }
@@ -251,8 +415,11 @@ store_test_results() {
         "unit": "${STAGE_RESULTS[unit]:-skipped}",
         "accessibility": "${STAGE_RESULTS[accessibility]:-skipped}",
         "flow": "${STAGE_RESULTS[flow]:-skipped}",
+        "discover": "${STAGE_RESULTS[discover]:-skipped}",
         "ui": "${STAGE_RESULTS[ui]:-skipped}",
-        "run": "${STAGE_RESULTS[run]:-skipped}"
+        "run": "${STAGE_RESULTS[run]:-skipped}",
+        "maestro": "${STAGE_RESULTS[maestro]:-skipped}",
+        "argent": "${STAGE_RESULTS[argent]:-skipped}"
     }
 }
 EOF
@@ -300,6 +467,10 @@ parse_arguments() {
                 YOLO_MODE="true"
                 shift 1
                 ;;
+            --skip-stage)
+                SKIP_STAGE_PROMPT="true"
+                shift 1
+                ;;
             --record)
                 RECORD="true"
                 shift 1
@@ -332,6 +503,22 @@ parse_arguments() {
                 SKIP_RUN="true"
                 shift 1
                 ;;
+            --skip-argent)
+                SKIP_ARGENT="true"
+                shift 1
+                ;;
+            --skip-maestro)
+                SKIP_MAESTRO="true"
+                shift 1
+                ;;
+            --discover)
+                DISCOVER_FLOWS="true"
+                shift 1
+                ;;
+            --learn)
+                LEARN_FLOWS="true"
+                shift 1
+                ;;
             --verbose|-v)
                 VERBOSE="true"
                 shift 1
@@ -360,6 +547,15 @@ parse_arguments() {
                 ;;
             --capture-pipeline-logs)
                 CAPTURE_PIPELINE_LOGS="true"
+                shift 1
+                ;;
+            --stress-test)
+                STRESS_TEST="true"
+                STRESS_LEVEL="${2:-1}"
+                shift 2
+                ;;
+            --happy-only)
+                HAPPY_ONLY="true"
                 shift 1
                 ;;
             --help|-h)
@@ -398,6 +594,9 @@ initialize() {
     # Stage tracking file
     STAGES_FILE="${ARTIFACTS_RUN_DIR}/stages.json"
     echo '{"stages": {}}' > "$STAGES_FILE"
+
+    # Pipeline state file (persists across runs)
+    PIPELINE_STATE_FILE="${ARTIFACTS_DIR}/.pipeline_state.json"
 
     # Verify agent scripts exist
     for script in "$UNIT_TEST_AGENT" "$ACCESSIBILITY_AGENT" "$FLOW_AGENT" "$UI_TEST_AGENT" "$TEST_RUNNER"; do
@@ -441,20 +640,28 @@ update_stage_status() {
     local status="$2"
     local duration="${3:-0}"
     local details="${4:-}"
+    local coverage="${5:-0}"
 
     STAGE_RESULTS[$stage]="$status"
     STAGE_DURATIONS[$stage]="$duration"
+    if [ "$coverage" -gt 0 ]; then
+        STAGE_COVERAGE[$stage]="$coverage"
+    fi
 
     if command -v jq >/dev/null 2>&1; then
         local tmp_file
         tmp_file=$(mktemp)
-        jq ".stages.\"$stage\" = {\"status\": \"$status\", \"duration\": $duration, \"details\": \"$details\"}" "$STAGES_FILE" > "$tmp_file"
+        jq ".stages.\"$stage\" = {\"status\": \"$status\", \"duration\": $duration, \"details\": \"$details\", \"coverage\": $coverage}" "$STAGES_FILE" > "$tmp_file"
         mv "$tmp_file" "$STAGES_FILE"
     fi
 
     case "$status" in
         completed)
-            log_success "Stage $stage completed (${duration}s)"
+            if [ "$coverage" -gt 0 ]; then
+                log_success "Stage $stage completed (${duration}s, coverage: ${coverage}%)"
+            else
+                log_success "Stage $stage completed (${duration}s)"
+            fi
             ;;
         failed)
             log_error "Stage $stage failed (${duration}s)"
@@ -463,6 +670,53 @@ update_stage_status() {
             log_warning "Stage $stage skipped"
             ;;
     esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rare Event Simulation / Stress Testing
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Apply stress perturbations to the pipeline
+apply_stress_test() {
+    local stage="$1"
+    if [ "$STRESS_TEST" != "true" ]; then
+        return 0
+    fi
+
+    log_warning "STRESS TEST mode (level: $STRESS_LEVEL) — applying perturbations to $stage"
+
+    # Perturbation 1: Random provider switch
+    if [ "$STRESS_LEVEL" -ge 1 ] && [ "$((RANDOM % 3))" -eq 0 ]; then
+        local providers=()
+        while IFS= read -r p; do [ -n "$p" ] && providers+=("$p"); done <<< "$(discover_available_providers)"
+        if [ ${#providers[@]} -gt 1 ]; then
+            local random_provider="${providers[$((RANDOM % ${#providers[@]}))]}"
+            log_info "[STRESS] Random provider switch: $AI_PROVIDER → $random_provider"
+            AI_PROVIDER="$random_provider"
+        fi
+    fi
+
+    # Perturbation 2: Artificial delay
+    if [ "$STRESS_LEVEL" -ge 2 ] && [ "$((RANDOM % 2))" -eq 0 ]; then
+        local delay=$((RANDOM % 5 + 1))
+        log_info "[STRESS] Artificial delay: ${delay}s"
+        sleep "$delay"
+    fi
+
+    # Perturbation 3: Simulate provider failure (skip stage)
+    if [ "$STRESS_LEVEL" -ge 3 ] && [ "$((RANDOM % 5))" -eq 0 ]; then
+        log_error "[STRESS] Simulated provider failure for stage: $stage"
+        return 1
+    fi
+
+    # Perturbation 4: Reduce context size
+    if [ "$STRESS_LEVEL" -ge 2 ] && [ "$((RANDOM % 3))" -eq 0 ]; then
+        local reduced_context=$((MAX_CONTEXT_CHARS / 2))
+        log_info "[STRESS] Reduced context cap: $MAX_CONTEXT_CHARS → $reduced_context"
+        MAX_CONTEXT_CHARS="$reduced_context"
+    fi
+
+    return 0
 }
 
 # Check if stage should run
@@ -476,7 +730,7 @@ should_run_stage() {
 
     # Check resume-from
     if [ -n "$RESUME_FROM" ]; then
-        local stages=("unit" "accessibility" "flow" "ui" "run" "report")
+        local stages=("unit" "accessibility" "flow" "discover" "ui" "run" "maestro" "argent" "report")
         local found_resume=false
         for s in "${stages[@]}"; do
             if [ "$s" = "$RESUME_FROM" ]; then
@@ -494,8 +748,39 @@ should_run_stage() {
         unit) [ "$SKIP_UNIT" = "true" ] && return 1 ;;
         accessibility) [ "$SKIP_ACCESSIBILITY" = "true" ] && return 1 ;;
         flow) [ "$SKIP_FLOW" = "true" ] && return 1 ;;
+        discover)
+            # Auto-run discover on first build if .maestro/ is empty
+            if [ "$DISCOVER_FLOWS" = "true" ]; then
+                return 0
+            fi
+            local _maestro_dir=""
+            if [ -n "$PROJECT_PATH" ] && [ "$PROJECT_PATH" != "." ] && [ -d "$PROJECT_PATH" ]; then
+                _maestro_dir="${PROJECT_PATH}/.maestro"
+            else
+                _maestro_dir="${ARTIFACTS_RUN_DIR:-./Artifacts}/.maestro"
+            fi
+            if [ ! -d "$_maestro_dir" ] || [ -z "$(ls -A "$_maestro_dir" 2>/dev/null)" ]; then
+                log_info "Auto-discovering Maestro flows (first build detected)"
+                return 0
+            fi
+            return 1
+            ;;
         ui) [ "$SKIP_UI" = "true" ] && return 1 ;;
         run) [ "$SKIP_RUN" = "true" ] && return 1 ;;
+        maestro)
+            [ "$SKIP_MAESTRO" = "true" ] && return 1
+            if [ -z "$SIMULATOR_NAME" ]; then
+                log_warning "No simulator specified (--simulator-name) — skipping Maestro UI flows"
+                return 1
+            fi
+            ;;
+        argent)
+            [ "$SKIP_ARGENT" = "true" ] && return 1
+            if [ -z "$SIMULATOR_NAME" ]; then
+                log_warning "No simulator specified (--simulator-name) — skipping Argent runtime verification"
+                return 1
+            fi
+            ;;
     esac
 
     return 0
@@ -577,26 +862,52 @@ start_pipeline_log_capture() {
 }
 
 # Build common arguments for agents
-build_agent_args() {
+# Common args supported by all agents
+build_common_args() {
     local args=""
-
     if [ -n "${XCODE_WORKSPACE:-}" ]; then
         args="$args --project \"$XCODE_WORKSPACE\""
     elif [ -n "${XCODE_PROJECT:-}" ]; then
         args="$args --project \"$XCODE_PROJECT\""
     fi
-
-    if [ -n "$SCHEME" ]; then
-        args="$args --scheme \"$SCHEME\""
-    fi
-
-    args="$args --ai-provider \"$AI_PROVIDER\""
     args="$args --artifacts-dir \"${ARTIFACTS_RUN_DIR}\""
-
     [ "$YOLO_MODE" = "true" ] && args="$args --yolo"
     [ "$VERBOSE" = "true" ] && args="$args --verbose"
     [ "$DRY_RUN" = "true" ] && args="$args --dry-run"
+    echo "$args"
+}
 
+# Args for agents that support --scheme and --ai-provider
+build_unit_test_args() {
+    local args=$(build_common_args)
+    [ -n "$SCHEME" ] && args="$args --scheme \"$SCHEME\""
+    args="$args --ai-provider \"$AI_PROVIDER\""
+    [ "$HAPPY_ONLY" = "true" ] && args="$args --happy-only"
+    [ -n "$SIMULATOR_NAME" ] && args="$args --simulator-name \"$SIMULATOR_NAME\""
+    echo "$args"
+}
+
+# Args for accessibility agent (no --happy-only)
+build_accessibility_args() {
+    local args=$(build_common_args)
+    [ -n "$SCHEME" ] && args="$args --scheme \"$SCHEME\""
+    args="$args --ai-provider \"$AI_PROVIDER\""
+    [ -n "$SIMULATOR_NAME" ] && args="$args --simulator-name \"$SIMULATOR_NAME\""
+    echo "$args"
+}
+
+# Args for flow agent (no --scheme, no --happy-only)
+build_flow_args() {
+    local args=$(build_common_args)
+    args="$args --ai-provider \"$AI_PROVIDER\""
+    echo "$args"
+}
+
+# Args for test runner (no --ai-provider, no --happy-only)
+build_test_runner_args() {
+    local args=$(build_common_args)
+    [ -n "$SCHEME" ] && args="$args --scheme \"$SCHEME\""
+    [ -n "$SIMULATOR_NAME" ] && args="$args --simulator-name \"$SIMULATOR_NAME\""
     echo "$args"
 }
 
@@ -611,16 +922,26 @@ run_stage_unit() {
         return 0
     fi
 
+    if prompt_skip_stage "unit"; then
+        update_stage_status "unit" "skipped" 0 "user skipped"
+        return 0
+    fi
+
     CURRENT_STAGE="unit"
     log_section "────────────────────────────────────────"
     log_section "Stage 1/6: Unit Test Generation"
     log_section "────────────────────────────────────────"
     echo "" >&2
 
+    if ! apply_stress_test "unit"; then
+        update_stage_status "unit" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
     local start_time
     start_time=$(date +%s)
     local args
-    args=$(build_agent_args)
+    args=$(build_unit_test_args)
 
     if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY RUN] Would run: $UNIT_TEST_AGENT $args"
@@ -638,7 +959,13 @@ run_stage_unit() {
     local duration=$(($(date +%s) - start_time))
 
     if [ $exit_code -eq 0 ]; then
-        update_stage_status "unit" "completed" $duration
+        # Extract coverage from unit test results if available
+        local coverage=0
+        local results_json="${ARTIFACTS_RUN_DIR}/unit_test_results.json"
+        if [ -f "$results_json" ] && command -v jq >/dev/null 2>&1; then
+            coverage=$(jq '.coverageAchieved // 0' "$results_json" 2>/dev/null || echo "0")
+        fi
+        update_stage_status "unit" "completed" $duration "" "$coverage"
         return 0
     else
         update_stage_status "unit" "failed" $duration "exit code: $exit_code"
@@ -653,16 +980,26 @@ run_stage_accessibility() {
         return 0
     fi
 
+    if prompt_skip_stage "accessibility"; then
+        update_stage_status "accessibility" "skipped" 0 "user skipped"
+        return 0
+    fi
+
     CURRENT_STAGE="accessibility"
     log_section "────────────────────────────────────────"
     log_section "Stage 2/6: Accessibility Compliance"
     log_section "────────────────────────────────────────"
     echo "" >&2
 
+    if ! apply_stress_test "accessibility"; then
+        update_stage_status "accessibility" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
     local start_time
     start_time=$(date +%s)
     local args
-    args=$(build_agent_args)
+    args=$(build_accessibility_args)
 
     if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY RUN] Would run: $ACCESSIBILITY_AGENT $args"
@@ -695,16 +1032,26 @@ run_stage_flow() {
         return 0
     fi
 
+    if prompt_skip_stage "flow"; then
+        update_stage_status "flow" "skipped" 0 "user skipped"
+        return 0
+    fi
+
     CURRENT_STAGE="flow"
     log_section "────────────────────────────────────────"
     log_section "Stage 3/6: Flow Analysis"
     log_section "────────────────────────────────────────"
     echo "" >&2
 
+    if ! apply_stress_test "flow"; then
+        update_stage_status "flow" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
     local start_time
     start_time=$(date +%s)
     local args
-    args=$(build_agent_args)
+    args=$(build_flow_args)
     args="$args --output \"${ARTIFACTS_RUN_DIR}/flows.json\""
 
     if [ "$DRY_RUN" = "true" ]; then
@@ -731,10 +1078,163 @@ run_stage_flow() {
     fi
 }
 
+# Stage 3b: Discover Maestro Flows from Code
+run_stage_discover() {
+    if ! should_run_stage "discover"; then
+        update_stage_status "discover" "skipped"
+        return 0
+    fi
+
+    if prompt_skip_stage "discover"; then
+        update_stage_status "discover" "skipped" 0 "user skipped"
+        return 0
+    fi
+
+    CURRENT_STAGE="discover"
+    log_section "────────────────────────────────────────"
+    log_section "Stage 3b/8: Discover Maestro Flows"
+    log_section "────────────────────────────────────────"
+    echo "" >&2
+
+    if ! apply_stress_test "discover"; then
+        update_stage_status "discover" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
+    local start_time
+    start_time=$(date +%s)
+
+    local maestro_dir=""
+    if [ -n "$PROJECT_PATH" ] && [ "$PROJECT_PATH" != "." ] && [ -d "$PROJECT_PATH" ]; then
+        maestro_dir="${PROJECT_PATH}/.maestro"
+    else
+        maestro_dir="${ARTIFACTS_RUN_DIR}/.maestro"
+    fi
+    local analyzer="${SCRIPT_DIR}/lib/testgen/swift_ui_analyzer.py"
+    local change_analyzer="${SCRIPT_DIR}/lib/testgen/code_change_analyzer.py"
+    local generator="${SCRIPT_DIR}/lib/testgen/maestro_flow_generator.py"
+    local learner="${SCRIPT_DIR}/lib/testgen/flow_learner.py"
+    local structure_json="${ARTIFACTS_RUN_DIR}/app_structure.json"
+    local changes_json="${ARTIFACTS_RUN_DIR}/changes_analysis.json"
+
+    # Auto-discover on first build if .maestro/ doesn't exist
+    if [ "$DISCOVER_FLOWS" != "true" ] && [ -d "$maestro_dir" ] && [ -n "$(ls -A "$maestro_dir" 2>/dev/null)" ]; then
+        log_info "Maestro flows already exist — skipping discovery (use --discover to force)"
+        update_stage_status "discover" "skipped" 0 "flows already exist"
+        return 0
+    fi
+
+    if [ ! -f "$analyzer" ]; then
+        log_warning "Swift analyzer not found — skipping flow discovery"
+        update_stage_status "discover" "skipped" 0 "analyzer not found"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY RUN] Would discover flows from Swift code"
+        update_stage_status "discover" "completed" 0 "dry-run"
+        return 0
+    fi
+
+    mkdir -p "$maestro_dir"
+
+    # Step 1: Analyze Swift code
+    log_info "Analyzing SwiftUI code structure..."
+    local analyze_exit=0
+    python3 "$analyzer" \
+        --project-dir "$PROJECT_PATH" \
+        --output "$structure_json" 2>&1 | tee "${LOGS_DIR}/discover_analyze.log" || analyze_exit=$?
+
+    if [ $analyze_exit -ne 0 ]; then
+        log_warning "Swift analysis failed — Maestro flows not generated"
+        update_stage_status "discover" "failed" $(($(date +%s) - start_time)) "analyzer failed"
+        return 0  # Don't fail pipeline for discovery issues
+    fi
+
+    # Step 1b: Analyze git changes for targeted regression
+    if [ -f "$change_analyzer" ] && [ -d "${PROJECT_PATH}/.git" ]; then
+        log_info "Analyzing git changes for targeted regression..."
+        local change_exit=0
+        python3 "$change_analyzer" \
+            --project-root "$PROJECT_PATH" \
+            --output "$changes_json" 2>&1 | tee "${LOGS_DIR}/discover_changes.log" || change_exit=$?
+        if [ $change_exit -eq 0 ] && [ -f "$changes_json" ]; then
+            log_info "Change analysis complete — will generate targeted regression flows"
+        else
+            log_warning "Change analysis failed — falling back to generic regression"
+            changes_json=""
+        fi
+    fi
+
+    # Step 2: Generate Maestro flows
+    log_info "Generating Maestro test flows..."
+    local gen_exit=0
+    local gen_args=(
+        --app-structure "$structure_json"
+        --output-dir "$maestro_dir"
+        --bundle-id "${BUNDLE_ID:-tech.eocon.AmmoScan}"
+        --categories "smoke,regression"
+    )
+    [ -n "$changes_json" ] && [ -f "$changes_json" ] && gen_args+=(--changes-file "$changes_json")
+    python3 "$generator" "${gen_args[@]}" 2>&1 | tee "${LOGS_DIR}/discover_generate.log" || gen_exit=$?
+
+    local duration=$(($(date +%s) - start_time))
+
+    if [ $gen_exit -ne 0 ]; then
+        log_warning "Flow generation had issues — continuing"
+        update_stage_status "discover" "failed" $duration "generator failed"
+        return 0  # Don't fail pipeline
+    fi
+
+    # Step 3: Learn reliable assertions (if --learn or first build)
+    if [ "$LEARN_FLOWS" = "true" ] || [ ! -f "${maestro_dir}/learned_assertions.json" ]; then
+        # Ensure maestro is in PATH
+        if [ -d "$HOME/.maestro/bin" ]; then
+            export PATH="$PATH:$HOME/.maestro/bin"
+        fi
+        if [ -f "$learner" ] && (command -v maestro >/dev/null 2>&1 || [ -x "$HOME/.maestro/bin/maestro" ]); then
+            log_info "Learning reliable assertions from smoke test run..."
+            local learn_exit=0
+            python3 "$learner" \
+                --run-and-learn \
+                --project-dir "$PROJECT_PATH" \
+                --bundle-id "${BUNDLE_ID:-tech.eocon.AmmoScan}" 2>&1 | tee "${LOGS_DIR}/discover_learn.log" || learn_exit=$?
+            if [ $learn_exit -eq 0 ]; then
+                log_success "Flow learning complete — smoke tests regenerated with proven assertions"
+                # Re-generate regression flows with learned knowledge
+                if [ -f "$generator" ] && [ -f "$structure_json" ]; then
+                    log_info "Re-generating regression flows with learned assertions..."
+                    local regen_args=(
+                        --app-structure "$structure_json"
+                        --output-dir "$maestro_dir"
+                        --bundle-id "${BUNDLE_ID:-tech.eocon.AmmoScan}"
+                        --categories "regression"
+                    )
+                    [ -n "$changes_json" ] && [ -f "$changes_json" ] && regen_args+=(--changes-file "$changes_json")
+                    python3 "$generator" "${regen_args[@]}" 2>&1 | tee "${LOGS_DIR}/discover_regression_regen.log" || true
+                fi
+            else
+                log_warning "Flow learning had issues — using statically generated flows"
+            fi
+        else
+            log_info "Maestro CLI not available — skipping flow learning"
+        fi
+    fi
+
+    log_success "Maestro flows discovered and generated"
+    update_stage_status "discover" "completed" $duration
+    return 0
+}
+
 # Stage 4: UI Test Generation
 run_stage_ui() {
     if ! should_run_stage "ui"; then
         update_stage_status "ui" "skipped"
+        return 0
+    fi
+
+    if prompt_skip_stage "ui"; then
+        update_stage_status "ui" "skipped" 0 "user skipped"
         return 0
     fi
 
@@ -743,6 +1243,11 @@ run_stage_ui() {
     log_section "Stage 4/6: UI Test Generation"
     log_section "────────────────────────────────────────"
     echo "" >&2
+
+    if ! apply_stress_test "ui"; then
+        update_stage_status "ui" "failed" 0 "stress test simulation"
+        return 10
+    fi
 
     # Check if flows file exists
     local flows_file="${ARTIFACTS_RUN_DIR}/flows.json"
@@ -789,16 +1294,26 @@ run_stage_run() {
         return 0
     fi
 
+    if prompt_skip_stage "run"; then
+        update_stage_status "run" "skipped" 0 "user skipped"
+        return 0
+    fi
+
     CURRENT_STAGE="run"
     log_section "────────────────────────────────────────"
     log_section "Stage 5/6: Test Execution"
     log_section "────────────────────────────────────────"
     echo "" >&2
 
+    if ! apply_stress_test "run"; then
+        update_stage_status "run" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
     local start_time
     start_time=$(date +%s)
     local args
-    args=$(build_agent_args)
+    args=$(build_test_runner_args)
     args="$args --report-dir \"$REPORT_DIR\""
 
     [ "$RECORD" = "true" ] && args="$args --record"
@@ -828,6 +1343,290 @@ run_stage_run() {
     fi
 }
 
+# Stage 5a: Maestro UI Flow Verification
+run_stage_maestro() {
+    if ! should_run_stage "maestro"; then
+        update_stage_status "maestro" "skipped"
+        return 0
+    fi
+
+    if prompt_skip_stage "maestro"; then
+        update_stage_status "maestro" "skipped" 0 "user skipped"
+        return 0
+    fi
+
+    CURRENT_STAGE="maestro"
+    log_section "────────────────────────────────────────"
+    log_section "Stage 5a/7: Maestro UI Flow Verification"
+    log_section "────────────────────────────────────────"
+    echo "" >&2
+
+    if ! apply_stress_test "maestro"; then
+        update_stage_status "maestro" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
+    local start_time
+    start_time=$(date +%s)
+
+    # Check Maestro is installed
+    if ! command -v maestro >/dev/null 2>&1; then
+        if [ -d "$HOME/.maestro/bin" ]; then
+            export PATH="$PATH:$HOME/.maestro/bin"
+        else
+            log_warning "Maestro not installed — skipping Maestro UI flows"
+            update_stage_status "maestro" "skipped" 0 "maestro not installed"
+            return 0
+        fi
+    fi
+
+    # Find Maestro workspace
+    local maestro_dir="${PROJECT_PATH}/.maestro"
+    if [ ! -d "$maestro_dir" ]; then
+        log_warning "No .maestro/ directory found in project — skipping Maestro UI flows"
+        update_stage_status "maestro" "skipped" 0 "no .maestro directory"
+        return 0
+    fi
+
+    local maestro_artifacts="${ARTIFACTS_RUN_DIR}/maestro"
+    mkdir -p "$maestro_artifacts"
+
+    # Clean previous screenshots to avoid stale artifacts
+    rm -rf "${maestro_artifacts}/screenshots"
+
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY RUN] Would run: maestro test ${maestro_dir}/"
+        update_stage_status "maestro" "completed" 0 "dry-run"
+        return 0
+    fi
+
+    # Suppress Maestro analytics notifications
+    export MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true
+
+    local maestro_exit=0
+    set +e
+    maestro test "$maestro_dir/" \
+        --debug-output "$maestro_artifacts" \
+        --test-output-dir "$maestro_artifacts" \
+        --flatten-debug-output \
+        2>&1 | tee "${LOGS_DIR}/maestro.log"
+    maestro_exit=${PIPESTATUS[0]}
+    set -e
+
+    local duration=$(($(date +%s) - start_time))
+
+    # Parse flow results from commands JSON files
+    local total_flows=0
+    local passed_flows=0
+    local failed_flows=0
+    local flow_summaries="[]"
+
+    for cmd_json in "${maestro_artifacts}"/commands-*.json; do
+        [ -f "$cmd_json" ] || continue
+        total_flows=$((total_flows + 1))
+        local flow_name
+        flow_name=$(basename "$cmd_json" .json | sed 's/commands-(//' | sed 's/)//')
+
+        # Check if any step failed
+        local failed_steps
+        failed_steps=$(jq '[.[] | select(.metadata.status != "COMPLETED")] | length' "$cmd_json" 2>/dev/null || echo "0")
+        local total_steps
+        total_steps=$(jq 'length' "$cmd_json" 2>/dev/null || echo "0")
+
+        local flow_status="passed"
+        local flow_duration=0
+        if [ "$failed_steps" -gt 0 ]; then
+            flow_status="failed"
+            failed_flows=$((failed_flows + 1))
+        else
+            passed_flows=$((passed_flows + 1))
+        fi
+
+        # Calculate total duration from all steps
+        flow_duration=$(jq '[.[] | .metadata.duration // 0] | add' "$cmd_json" 2>/dev/null || echo "0")
+
+        # Build flow summary entry
+        local flow_entry
+        flow_entry=$(jq -n \
+            --arg name "$flow_name" \
+            --arg status "$flow_status" \
+            --argjson duration "$flow_duration" \
+            --argjson total_steps "$total_steps" \
+            --argjson failed_steps "$failed_steps" \
+            '{name: $name, status: $status, duration_ms: $duration, total_steps: $total_steps, failed_steps: $failed_steps}')
+        flow_summaries=$(echo "$flow_summaries" | jq --argjson entry "$flow_entry" '. + [$entry]' 2>/dev/null || echo "$flow_summaries")
+    done
+
+    # Collect screenshots
+    local screenshots="[]"
+    for screenshot in "${maestro_artifacts}"/screenshots/*.png; do
+        [ -f "$screenshot" ] || continue
+        screenshots=$(echo "$screenshots" | jq --arg path "$screenshot" '. + [$path]' 2>/dev/null || echo "$screenshots")
+    done
+
+    # Write Maestro summary JSON for report consumption
+    local summary_json="${maestro_artifacts}/summary.json"
+    jq -n \
+        --arg status "$([ $maestro_exit -eq 0 ] && echo "passed" || echo "failed")" \
+        --argjson total_flows "$total_flows" \
+        --argjson passed_flows "$passed_flows" \
+        --argjson failed_flows "$failed_flows" \
+        --argjson flows "$flow_summaries" \
+        --argjson screenshots "$screenshots" \
+        '{status: $status, total_flows: $total_flows, passed_flows: $passed_flows, failed_flows: $failed_flows, flows: $flows, screenshots: $screenshots}' > "$summary_json" 2>/dev/null || true
+
+    if [ $maestro_exit -eq 0 ]; then
+        log_success "Maestro UI flows passed ($passed_flows/$total_flows)"
+        update_stage_status "maestro" "completed" $duration
+        return 0
+    else
+        log_error "Maestro UI flows failed ($failed_flows/$total_flows)"
+        update_stage_status "maestro" "failed" $duration "exit code: $maestro_exit"
+        return 10
+    fi
+}
+
+# Stage 5b: Argent Runtime Verification (Deep Diagnostics Fallback)
+run_stage_argent() {
+    if ! should_run_stage "argent"; then
+        update_stage_status "argent" "skipped"
+        return 0
+    fi
+
+    if prompt_skip_stage "argent"; then
+        update_stage_status "argent" "skipped" 0 "user skipped"
+        return 0
+    fi
+
+    CURRENT_STAGE="argent"
+    log_section "────────────────────────────────────────"
+    log_section "Stage 5b/7: Argent Runtime Verification"
+    log_section "────────────────────────────────────────"
+    echo "" >&2
+
+    if ! apply_stress_test "argent"; then
+        update_stage_status "argent" "failed" 0 "stress test simulation"
+        return 10
+    fi
+
+    local start_time
+    start_time=$(date +%s)
+
+    # Build argent args
+    local argent_args=(--simulator "$SIMULATOR_NAME" --artifacts-dir "$ARTIFACTS_RUN_DIR")
+    [ -f "${ARTIFACTS_RUN_DIR}/flows.json" ] && argent_args+=(--flows "${ARTIFACTS_RUN_DIR}/flows.json")
+    [ "$VERBOSE" = "true" ] && argent_args+=(--verbose)
+    [ "$DRY_RUN" = "true" ] && argent_args+=(--dry-run)
+
+    if [ "$DRY_RUN" = "true" ]; then
+        log_info "[DRY RUN] Would run: $ARGENT_RUNTIME_AGENT ${argent_args[*]}"
+        update_stage_status "argent" "completed" 0 "dry-run"
+        return 0
+    fi
+
+    local argent_exit=0
+    set +e
+    "$ARGENT_RUNTIME_AGENT" "${argent_args[@]}" 2>&1 | tee "${LOGS_DIR}/argent.log"
+    argent_exit=${PIPESTATUS[0]}
+    set -e
+
+    local duration=$(($(date +%s) - start_time))
+
+    case $argent_exit in
+        0)
+            update_stage_status "argent" "completed" $duration
+            return 0
+            ;;
+        11)
+            log_warning "Argent misconfiguration — skipping"
+            update_stage_status "argent" "skipped" $duration "misconfiguration"
+            return 0
+            ;;
+        10)
+            # Enter self-healing repair cycle
+            local errors_file="${ARTIFACTS_RUN_DIR}/argent/errors.json"
+            local attempt=0
+
+            while [ $attempt -lt "$MAX_ARGENT_REPAIR_ATTEMPTS" ]; do
+                attempt=$((attempt + 1))
+                log_info "Argent verification failed — invoking BuildAgent for repair (attempt ${attempt}/${MAX_ARGENT_REPAIR_ATTEMPTS})"
+
+                # Build repair args
+                local repair_args=(--repair-from-errors "$errors_file" --ai-provider "$AI_PROVIDER" --artifacts-dir "$ARTIFACTS_RUN_DIR")
+                [ "$YOLO_MODE" = "true" ] && repair_args+=(--yolo)
+                [ "$VERBOSE" = "true" ] && repair_args+=(--verbose)
+
+                local ba_exit=0
+                set +e
+                "$BUILD_AGENT" "${repair_args[@]}" 2>&1 | tee "${LOGS_DIR}/argent_repair_${attempt}.log"
+                ba_exit=${PIPESTATUS[0]}
+                set -e
+
+                if [ $ba_exit -ne 0 ]; then
+                    log_warning "BuildAgent repair attempt $attempt failed (exit $ba_exit)"
+                    continue
+                fi
+
+                # BuildAgent's setup_directories() always creates a nested
+                # build_<timestamp> directory under the --artifacts-dir it receives,
+                # and writes build_output.txt there.  Pick the most-recently written
+                # file so we always follow the latest repair rebuild.
+                local build_output_file
+                build_output_file=$(ls -t "${ARTIFACTS_RUN_DIR}"/build_*/build_output.txt 2>/dev/null | head -1 || true)
+                local new_app_path=""
+                [ -f "$build_output_file" ] && new_app_path=$(cat "$build_output_file")
+                if [ -z "$new_app_path" ]; then
+                    log_warning "build_output.txt not found under ${ARTIFACTS_RUN_DIR}/build_*/ — retry will rely on Argent auto-detection"
+                fi
+
+                # Re-run argentRuntimeAgent with updated .app path
+                local retry_args=(--simulator "$SIMULATOR_NAME" --artifacts-dir "$ARTIFACTS_RUN_DIR")
+                [ -n "$new_app_path" ] && retry_args+=(--app-path "$new_app_path")
+                [ -f "${ARTIFACTS_RUN_DIR}/flows.json" ] && retry_args+=(--flows "${ARTIFACTS_RUN_DIR}/flows.json")
+                [ "$VERBOSE" = "true" ] && retry_args+=(--verbose)
+
+                local retry_exit=0
+                set +e
+                "$ARGENT_RUNTIME_AGENT" "${retry_args[@]}" 2>&1 | tee "${LOGS_DIR}/argent_retry_${attempt}.log"
+                retry_exit=${PIPESTATUS[0]}
+                set -e
+
+                if [ $retry_exit -eq 0 ]; then
+                    log_success "Argent repair succeeded on attempt $attempt"
+                    duration=$(($(date +%s) - start_time))
+                    update_stage_status "argent" "completed" $duration
+                    return 0
+                fi
+
+                if [ $retry_exit -eq 11 ]; then
+                    log_warning "Argent misconfiguration after repair (exit 11) — skipping remaining attempts"
+                    duration=$(($(date +%s) - start_time))
+                    update_stage_status "argent" "skipped" $duration "misconfiguration after repair"
+                    return 0
+                fi
+
+                if [ $retry_exit -ne 10 ]; then
+                    log_error "Argent returned non-repairable exit code $retry_exit — aborting repair loop"
+                    duration=$(($(date +%s) - start_time))
+                    update_stage_status "argent" "failed" $duration "non-repairable exit: $retry_exit"
+                    return 10
+                fi
+
+                log_warning "Argent still failing (exit 10) after repair attempt $attempt — retrying"
+            done
+
+            log_error "Argent repair exhausted after ${MAX_ARGENT_REPAIR_ATTEMPTS} attempts — continuing to report"
+            duration=$(($(date +%s) - start_time))
+            update_stage_status "argent" "failed" $duration "repair exhausted"
+            return 10
+            ;;
+        *)
+            update_stage_status "argent" "failed" $duration "exit code: $argent_exit"
+            return 10
+            ;;
+    esac
+}
+
 # Stage 6: Report Generation
 run_stage_report() {
     CURRENT_STAGE="report"
@@ -844,7 +1643,7 @@ run_stage_report() {
 
     # Build stage summary
     local stage_rows=""
-    for stage in unit accessibility flow ui run; do
+    for stage in unit accessibility flow discover ui run maestro argent; do
         local status="${STAGE_RESULTS[$stage]:-pending}"
         local duration="${STAGE_DURATIONS[$stage]:-0}"
         local status_class="warning"
@@ -868,11 +1667,77 @@ run_stage_report() {
         esac
     done
 
+    # Build Maestro summary section from maestro/summary.json if present
+    local maestro_section=""
+    local maestro_summary_file="${ARTIFACTS_RUN_DIR}/maestro/summary.json"
+    if [ -f "$maestro_summary_file" ] && command -v jq >/dev/null 2>&1; then
+        local maestro_status maestro_flow_rows maestro_screenshots
+        maestro_status=$(jq -r '.status // "unknown"' "$maestro_summary_file" 2>/dev/null || echo "unknown")
+        maestro_flow_rows=""
+        while IFS= read -r flow_row; do
+            maestro_flow_rows+="$flow_row"
+        done < <(jq -r '
+            .flows[]? |
+            "<tr><td>" + (.name // "unnamed") + "</td>" +
+            "<td>" + (.status // "unknown") + "</td>" +
+            "<td>" + ((.total_steps // 0) | tostring) + "/" + ((.failed_steps // 0) | tostring) + "</td>" +
+            "<td>" + ((.duration_ms // 0) | tostring) + "ms</td></tr>"
+        ' "$maestro_summary_file" 2>/dev/null || true)
+        maestro_screenshots=""
+        while IFS= read -r img_path; do
+            [ -f "$img_path" ] && maestro_screenshots+="<img src='${img_path}' style='max-width:200px;margin:4px;' alt='screenshot'/>"
+        done < <(find "${ARTIFACTS_RUN_DIR}/maestro/screenshots" -name "*.png" 2>/dev/null | sort || true)
+        maestro_section="
+    <div class='section'>
+        <h2>Maestro UI Flow Verification</h2>
+        <p>Status: <strong>${maestro_status}</strong></p>
+        $([ -n "$maestro_flow_rows" ] && echo "
+        <table>
+            <tr><th>Flow</th><th>Status</th><th>Steps (Total/Failed)</th><th>Duration</th></tr>
+            ${maestro_flow_rows}
+        </table>")
+        $([ -n "$maestro_screenshots" ] && echo "<div>${maestro_screenshots}</div>")
+    </div>"
+    fi
+
+    # Build Argent summary section from argent/summary.json if present
+    local argent_section=""
+    local argent_summary_file="${ARTIFACTS_RUN_DIR}/argent/summary.json"
+    if [ -f "$argent_summary_file" ] && command -v jq >/dev/null 2>&1; then
+        local argent_status argent_flow_rows argent_screenshots
+        argent_status=$(jq -r '.status // "unknown"' "$argent_summary_file" 2>/dev/null || echo "unknown")
+        argent_flow_rows=""
+        while IFS= read -r flow_row; do
+            argent_flow_rows+="$flow_row"
+        done < <(jq -r '
+            .flows[]? |
+            "<tr><td>" + (.name // "unnamed") + "</td>" +
+            "<td>" + (.status // "unknown") + "</td>" +
+            "<td>" + ((.stepsPassed // 0) | tostring) + "/" + ((.stepsTotal // 0) | tostring) + "</td>" +
+            "<td>" + (.error // "") + "</td></tr>"
+        ' "$argent_summary_file" 2>/dev/null || true)
+        argent_screenshots=""
+        while IFS= read -r img_path; do
+            [ -f "$img_path" ] && argent_screenshots+="<img src='${img_path}' style='max-width:200px;margin:4px;' alt='screenshot'/>"
+        done < <(find "${ARTIFACTS_RUN_DIR}/argent/screens" -name "*.png" 2>/dev/null | sort || true)
+        argent_section="
+    <div class='section'>
+        <h2>Argent Runtime Verification</h2>
+        <p>Status: <strong>${argent_status}</strong></p>
+        $([ -n "$argent_flow_rows" ] && echo "
+        <table>
+            <tr><th>Flow</th><th>Status</th><th>Steps</th><th>Error</th></tr>
+            ${argent_flow_rows}
+        </table>")
+        $([ -n "$argent_screenshots" ] && echo "<div>${argent_screenshots}</div>")
+    </div>"
+    fi
+
     local report_data="<div class='section'>
         <h2>Pipeline Summary</h2>
         <table>
             <tr><th>Metric</th><th>Value</th></tr>
-            <tr><td>Total Stages</td><td>6</td></tr>
+            <tr><td>Total Stages</td><td>8</td></tr>
             <tr><td>Completed</td><td class='success'>${completed}</td></tr>
             <tr><td>Failed</td><td class='failure'>${failed}</td></tr>
             <tr><td>Skipped</td><td class='warning'>${skipped}</td></tr>
@@ -887,7 +1752,8 @@ run_stage_report() {
             $stage_rows
         </table>
     </div>
-
+    ${maestro_section}
+    ${argent_section}
     <div class='section'>
         <h2>Configuration</h2>
         <table>
@@ -904,6 +1770,8 @@ run_stage_report() {
         <ul>
             <li><a href='flows.json'>Flow Definitions</a></li>
             <li><a href='TestReports/'>Test Reports</a></li>
+            <li><a href='maestro/'>Maestro UI Flow Artifacts</a></li>
+            <li><a href='argent/'>Argent Verification Artifacts</a></li>
             <li><a href='stages.json'>Stage Tracking</a></li>
         </ul>
     </div>"
@@ -916,7 +1784,7 @@ run_stage_report() {
 
     # JSON summary
     local json_data="{
-        \"totalStages\": 6,
+        \"totalStages\": 8,
         \"completedStages\": $completed,
         \"failedStages\": $failed,
         \"skippedStages\": $skipped,
@@ -930,6 +1798,51 @@ run_stage_report() {
         --format json \
         --output "${ARTIFACTS_RUN_DIR}/pipeline_summary.json" \
         --data "$json_data"
+
+    # ── Rich Argent HTML Report (with screenshots & code analysis) ─────────────
+    local rich_report_generator="${SCRIPT_DIR}/lib/testgen/report_generator.py"
+    if [ -f "$rich_report_generator" ]; then
+        log_info "Generating rich HTML report with screenshots..."
+        local combined_exec="${ARTIFACTS_RUN_DIR}/argent/executions_combined.json"
+        local analysis_json="${ARTIFACTS_RUN_DIR}/.argent/analysis.json"
+        local rich_report="${ARTIFACTS_RUN_DIR}/test_report.html"
+
+        # Build combined execution JSON from individual flow executions
+        if [ -d "${ARTIFACTS_RUN_DIR}/argent" ]; then
+            local valid_flows="[]"
+            for f in "${ARTIFACTS_RUN_DIR}/argent/execution_"*.json; do
+                [ -f "$f" ] || continue
+                # Handle both wrapped flow objects (with .steps) and raw NDJSON
+                if jq -e '.steps' "$f" >/dev/null 2>&1; then
+                    # Already wrapped flow object
+                    valid_flows=$(echo "$valid_flows" | jq --argjson flow "$(cat "$f")" '. + [$flow]' 2>/dev/null || echo "$valid_flows")
+                elif jq -s -e '.[0].kind' "$f" >/dev/null 2>&1; then
+                    # Raw NDJSON from flow-execute — wrap it
+                    local flow_name
+                    flow_name=$(basename "$f" .json | sed 's/execution_//')
+                    local wrapped
+                    wrapped=$(jq -s --arg name "$flow_name" --arg status "unknown" \
+                        '{name: $name, status: $status, steps: .}' "$f" 2>/dev/null)
+                    [ -n "$wrapped" ] && valid_flows=$(echo "$valid_flows" | jq --argjson flow "$wrapped" '. + [$flow]' 2>/dev/null || echo "$valid_flows")
+                fi
+            done
+            echo "{\"flows\": $valid_flows}" > "$combined_exec"
+
+            if python3 "$rich_report_generator" \
+                --execution-json "$combined_exec" \
+                ${analysis_json:+--analysis-json "$analysis_json"} \
+                --screenshots-dir "${ARTIFACTS_RUN_DIR}/argent/screens" \
+                --project-name "${SCHEME:-AmmoScan}" \
+                --bundle-id "${BUNDLE_ID:-}" \
+                --simulator "${SIMULATOR_NAME:-}" \
+                --output "$rich_report" 2>&1; then
+                log_success "Rich HTML report: $rich_report"
+            else
+                log_warning "Rich report generation failed"
+            fi
+            rm -f "$combined_exec"
+        fi
+    fi
 
     local duration=$(($(date +%s) - start_time))
     update_stage_status "report" "completed" $duration
@@ -957,14 +1870,20 @@ main() {
     # Retrieve build context from Letta memory if available
     retrieve_build_context
 
+    # Load previous pipeline state (coverage, etc.)
+    load_pipeline_state
+
     local exit_code=0
 
-    # Run pipeline stages
-    run_stage_unit || exit_code=10
-    run_stage_accessibility || exit_code=10
-    run_stage_flow || exit_code=10
-    run_stage_ui || exit_code=10
-    run_stage_run || exit_code=10
+    # Run pipeline stages with live keyboard skip support
+    run_stage_with_skip "unit" run_stage_unit || exit_code=10
+    run_stage_with_skip "accessibility" run_stage_accessibility || exit_code=10
+    run_stage_with_skip "flow" run_stage_flow || exit_code=10
+    run_stage_with_skip "discover" run_stage_discover || exit_code=10
+    run_stage_with_skip "ui" run_stage_ui || exit_code=10
+    run_stage_with_skip "run" run_stage_run || exit_code=10
+    run_stage_with_skip "maestro" run_stage_maestro || exit_code=10
+    run_stage_with_skip "argent" run_stage_argent || exit_code=10
     run_stage_report
 
     # Calculate final duration
@@ -994,7 +1913,7 @@ main() {
 
     # Print summary
     log_info "Stage Summary:"
-    for stage in unit accessibility flow ui run report; do
+    for stage in unit accessibility flow discover ui run maestro argent report; do
         local status="${STAGE_RESULTS[$stage]:-pending}"
         local duration="${STAGE_DURATIONS[$stage]:-0}"
         case "$status" in
@@ -1009,6 +1928,9 @@ main() {
     log_info "Total Duration: ${pipeline_duration}s"
     log_info "Artifacts: ${ARTIFACTS_RUN_DIR}"
     log_info "Report: ${ARTIFACTS_RUN_DIR}/pipeline_report.html"
+
+    # Save pipeline state for next run
+    save_pipeline_state
 
     # Stop pipeline log capture
     if [ "$CAPTURE_PIPELINE_LOGS" = "true" ] && [ -n "$PIPELINE_LOG_SESSION" ]; then

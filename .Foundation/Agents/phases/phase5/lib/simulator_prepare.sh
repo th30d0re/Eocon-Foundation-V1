@@ -49,7 +49,10 @@ prepare_simulator_for_testing() {
     local simulator="$1"
     local app_path="${2:-}"
     local bundle_id="${3:-}"
-    local config="${4:-{}}"
+    local config="$4"
+    if [ -z "$config" ]; then
+        config="{}"
+    fi
     
     # Parse configuration (use jq if available, otherwise use defaults)
     local autoboot=true
@@ -167,7 +170,10 @@ prepare_simulator_with_session() {
     local simulator="$1"
     local app_path="${2:-}"
     local bundle_id="${3:-}"
-    local override_config="${4:-{}}"
+    local override_config="$4"
+    if [ -z "$override_config" ]; then
+        override_config="{}"
+    fi
     
     # Check if session_store.sh is available
     local session_config="{}"

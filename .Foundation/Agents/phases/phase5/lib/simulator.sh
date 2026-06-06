@@ -230,10 +230,16 @@ get_simulator_by_name() {
     devices_json=$(_get_simulators_json) || return 1
 
     if _check_jq; then
-        # First try to find an available device with exact name match
+        # First try to find a booted device with exact name match
         local udid
         udid=$(echo "$devices_json" | jq -r --arg name "$name" \
-            '.devices | to_entries | .[].value | .[] | select(.name == $name and .isAvailable == true) | .udid' | head -1)
+            '.devices | to_entries | .[].value | .[] | select(.name == $name and .state == "Booted" and .isAvailable == true) | .udid' | head -1)
+
+        # If no booted device, fall back to first available
+        if [ -z "$udid" ]; then
+            udid=$(echo "$devices_json" | jq -r --arg name "$name" \
+                '.devices | to_entries | .[].value | .[] | select(.name == $name and .isAvailable == true) | .udid' | head -1)
+        fi
 
         if [ -n "$udid" ]; then
             # Check for duplicates and warn
@@ -242,7 +248,14 @@ get_simulator_by_name() {
                 '[.devices | to_entries | .[].value | .[] | select(.name == $name and .isAvailable == true)] | length')
 
             if [ "$count" -gt 1 ]; then
-                echo "Warning: Multiple simulators named '$name' found, using first available" >&2
+                local booted_count
+                booted_count=$(echo "$devices_json" | jq -r --arg name "$name" \
+                    '[.devices | to_entries | .[].value | .[] | select(.name == $name and .state == "Booted" and .isAvailable == true)] | length')
+                if [ "$booted_count" -gt 0 ]; then
+                    echo "Warning: Multiple simulators named '$name' found, using booted device" >&2
+                else
+                    echo "Warning: Multiple simulators named '$name' found, using first available" >&2
+                fi
             fi
 
             echo "$udid"

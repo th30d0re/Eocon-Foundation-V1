@@ -190,7 +190,7 @@ EXAMPLES:
     $0 --target-id 00008150-001D5822210A401C --scheme MyApp
 
     # Build for iOS Simulator
-    $0 --destination "platform=iOS Simulator,name=iPhone 15"
+    $0 --destination "platform=iOS Simulator,name=iPhone 17 Pro Max"
 
     # Build with workspace
     $0 --workspace MyApp.xcworkspace --scheme MyApp
@@ -745,9 +745,17 @@ build_destination() {
     fi
 
     if [ "${#dest_cmd_args[@]}" -gt 1 ]; then
-        # Get first available iPhone simulator from xcodebuild (array — avoids CWE-78)
+        local destinations
+        destinations=$("${dest_cmd_args[@]}" -scheme "${SCHEME:-Foundation}" -showdestinations 2>/dev/null | grep "platform:iOS Simulator" | grep "name:iPhone" | grep -v "placeholder")
+        # Prefer Pro Max, then Pro, then any iPhone
         local available_sim
-        available_sim=$("${dest_cmd_args[@]}" -scheme "${SCHEME:-Foundation}" -showdestinations 2>/dev/null | grep "platform:iOS Simulator" | grep "name:iPhone" | grep -v "placeholder" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        available_sim=$(echo "$destinations" | grep "Pro Max" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        if [ -z "$available_sim" ]; then
+            available_sim=$(echo "$destinations" | grep "Pro" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        fi
+        if [ -z "$available_sim" ]; then
+            available_sim=$(echo "$destinations" | head -1 | sed -n 's/.*name:\([^,}]*\).*/\1/p' | xargs)
+        fi
         if [ -n "$available_sim" ]; then
             DESTINATION="platform=iOS Simulator,name=$available_sim"
             log_info "Using default simulator destination: $DESTINATION"
@@ -1052,7 +1060,10 @@ output_json_result() {
     local output="$2"
     local error="${3:-null}"
     local duration="${4:-0}"
-    local extra_metadata="${5:-{}}"
+    local extra_metadata="$5"
+    if [ -z "$extra_metadata" ]; then
+        extra_metadata="{}"
+    fi
 
     if [ "$JSON_OUTPUT" != "true" ]; then
         return 0

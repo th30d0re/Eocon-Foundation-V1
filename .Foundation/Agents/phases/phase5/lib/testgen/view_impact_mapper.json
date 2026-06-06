@@ -1,0 +1,227 @@
+{
+  "_schema": "AmmoScan test impact mapping v1",
+  "_description": "Maps source files to test areas, navigation paths, and regression targets",
+
+  "tabs": {
+    "dashboard": {
+      "name": "Dashboard",
+      "tabBarIcon": "house",
+      "tabBarIndex": 0,
+      "tap_coords": { "x": 0.125, "y": 0.93 },
+      "root_view": "DashboardView",
+      "primary_views": ["DashboardView"],
+      "sheet_views": ["AnalyticsView", "ComplianceReportView", "QRCodeScannerView", "MASFExportOptionsView"]
+    },
+    "new_transaction": {
+      "name": "New Transaction",
+      "tabBarIcon": "plus.circle",
+      "tabBarIndex": 1,
+      "tap_coords": { "x": 0.375, "y": 0.93 },
+      "root_view": "TransactionEntryView",
+      "primary_views": ["TransactionEntryView"],
+      "sheet_views": ["FocusableCameraView", "FormScannerView", "DriverLicenseScannerView", "LTCCardScannerView", "PassportScannerView", "UPCBarcodeScannerView", "SignatureCaptureView", "ReceiptPreviewView", "ValidationIssuesSheet"]
+    },
+    "records": {
+      "name": "Records",
+      "tabBarIcon": "list.bullet",
+      "tabBarIndex": 2,
+      "tap_coords": { "x": 0.6, "y": 0.93 },
+      "root_view": "RecordsListView",
+      "primary_views": ["RecordsListView"],
+      "sheet_views": ["AdvancedSearchView", "RecordDetailView", "MASFExportOptionsView", "MASFExportProgressView", "ExportOptionsView"],
+      "toolbar_buttons": [
+        { "label": "Edit records", "icon": "square.and.pencil", "coords": { "x": 0.515, "y": 0.096 } },
+        { "label": "Export selected records", "icon": "square.and.arrow.up", "coords": { "x": 0.673, "y": 0.096 } },
+        { "label": "Export for audit", "icon": "checkmark.seal.fill", "coords": { "x": 0.816, "y": 0.096 } },
+        { "label": "Advanced Search", "icon": "line.horizontal.3.decrease.circle", "coords": { "x": 0.913, "y": 0.096 } }
+      ]
+    },
+    "settings": {
+      "name": "Settings",
+      "tabBarIcon": "gear",
+      "tabBarIndex": 3,
+      "tap_coords": { "x": 0.8, "y": 0.93 },
+      "root_view": "SettingsView",
+      "primary_views": ["SettingsView"],
+      "sheet_views": ["AboutView", "MASFExportHistoryView", "MASFImportView", "CachedUPCListView", "CertificateDetailView", "DiagnosticPanelView", "QuickSwitchSheet"],
+      "push_views": ["UserManagementView", "PermissionProfileView", "AuthenticationSettingsView", "OwnerTransferView", "AuditLogListView", "SessionHistoryView"]
+    }
+  },
+
+  "view_map": {
+    "DashboardView.swift": {
+      "tab": "dashboard",
+      "test_priority": "high",
+      "key_elements": [
+        { "type": "stat_card", "label": "Total Records" },
+        { "type": "stat_card", "label": "This Month" },
+        { "type": "stat_card", "label": "Total Ammunition" },
+        { "type": "stat_card", "label": "Active Customers" },
+        { "type": "button", "label": "View Analytics" },
+        { "type": "button", "label": "View All" }
+      ],
+      "regression_targets": ["RecordsListView", "AnalyticsView", "TransactionEntryView"]
+    },
+    "RecordsListView.swift": {
+      "tab": "records",
+      "test_priority": "high",
+      "key_elements": [
+        { "type": "search_field", "label": "Search records" },
+        { "type": "toolbar_button", "label": "Edit records" },
+        { "type": "toolbar_button", "label": "Export selected records" },
+        { "type": "toolbar_button", "label": "Export for audit" },
+        { "type": "toolbar_button", "label": "Advanced Search" },
+        { "type": "filter_chip", "label": "All" },
+        { "type": "filter_chip", "label": "Complete" },
+        { "type": "filter_chip", "label": "Incomplete" },
+        { "type": "filter_chip", "label": "Expired" }
+      ],
+      "regression_targets": ["AdvancedSearchView", "RecordDetailView", "DashboardView", "TransactionEntryView"]
+    },
+    "AdvancedSearchView.swift": {
+      "tab": "records",
+      "test_priority": "medium",
+      "presented_from": "RecordsListView",
+      "key_elements": [
+        { "type": "button", "label": "Cancel" },
+        { "type": "button", "label": "Apply" },
+        { "type": "button", "label": "Reset All" },
+        { "type": "date_picker", "label": "Date Range" },
+        { "type": "toggle", "label": "ltc" },
+        { "type": "toggle", "label": "fid" },
+        { "type": "toggle", "label": "passport" },
+        { "type": "toggle", "label": "sale" },
+        { "type": "toggle", "label": "transfer" },
+        { "type": "toggle", "label": "loan" },
+        { "type": "text_field", "label": "Customer Name" },
+        { "type": "text_field", "label": "Add Caliber" },
+        { "type": "button", "label": "Save Current Filters as Preset" }
+      ],
+      "regression_targets": ["RecordsListView"]
+    },
+    "SettingsView.swift": {
+      "tab": "settings",
+      "test_priority": "high",
+      "key_elements": [
+        { "type": "navigation_link", "label": "Manage Users" },
+        { "type": "navigation_link", "label": "Permission Profiles" },
+        { "type": "navigation_link", "label": "Transfer Ownership" },
+        { "type": "navigation_link", "label": "View Audit Logs" },
+        { "type": "navigation_link", "label": "Authentication Settings" },
+        { "type": "picker", "label": "Auto-lock Interval" },
+        { "type": "button", "label": "Lock App Now" },
+        { "type": "button", "label": "Generate Certificate" },
+        { "type": "button", "label": "Export History" },
+        { "type": "button", "label": "Export All Data" },
+        { "type": "button", "label": "Import MASF File" },
+        { "type": "button", "label": "Load Demo Data" },
+        { "type": "button", "label": "Delete All Data", "destructive": true },
+        { "type": "toggle", "label": "Use Foundation Model Cleanup" },
+        { "type": "toggle", "label": "Auto-lookup UPC" },
+        { "type": "button", "label": "View Cached UPCs" },
+        { "type": "button", "label": "Clear UPC Cache" },
+        { "type": "button", "label": "Find Printers" },
+        { "type": "button", "label": "Test Print" },
+        { "type": "navigation_link", "label": "About AmmoScan" },
+        { "type": "navigation_link", "label": "Privacy Policy" }
+      ],
+      "regression_targets": ["UserManagementView", "AuthenticationSettingsView", "DashboardView"]
+    },
+    "TransactionEntryView.swift": {
+      "tab": "new_transaction",
+      "test_priority": "high",
+      "key_elements": [
+        { "type": "text_field", "label": "Customer" },
+        { "type": "text_field", "label": "License" },
+        { "type": "segmented_control", "label": "Transaction Type" },
+        { "type": "button", "label": "Scan License" },
+        { "type": "button", "label": "Scan UPC" },
+        { "type": "button", "label": "Save Transaction" }
+      ],
+      "regression_targets": ["DashboardView", "RecordsListView"]
+    },
+    "UserManagementView.swift": {
+      "tab": "settings",
+      "test_priority": "medium",
+      "presented_from": "SettingsView",
+      "key_elements": [
+        { "type": "navigation_link", "label": "Manage Users" },
+        { "type": "button", "label": "Add User" }
+      ],
+      "regression_targets": ["SettingsView", "UserEditView", "PermissionProfileView"]
+    },
+    "AuthenticationSettingsView.swift": {
+      "tab": "settings",
+      "test_priority": "medium",
+      "presented_from": "SettingsView",
+      "key_elements": [
+        { "type": "toggle", "label": "Biometric Authentication" },
+        { "type": "toggle", "label": "PIN Required" },
+        { "type": "button", "label": "Change PIN" }
+      ],
+      "regression_targets": ["SettingsView", "SecurityManager"]
+    },
+    "ContentView.swift": {
+      "tab": "root",
+      "test_priority": "critical",
+      "key_elements": [
+        { "type": "state_branch", "label": "Authentication" },
+        { "type": "state_branch", "label": "SetupWizard" },
+        { "type": "state_branch", "label": "FirstRunOnboarding" },
+        { "type": "state_branch", "label": "UserLogin" },
+        { "type": "state_branch", "label": "MainApp" }
+      ],
+      "regression_targets": ["DashboardView", "RecordsListView", "SettingsView", "TransactionEntryView", "SecurityManager", "UserSessionManager"]
+    },
+    "SecurityManager.swift": {
+      "test_priority": "critical",
+      "affects_all": true,
+      "regression_targets": ["ContentView", "AuthenticationView", "SettingsView", "DashboardView", "RecordsListView", "TransactionEntryView"]
+    },
+    "UserSessionManager.swift": {
+      "test_priority": "critical",
+      "affects_all": true,
+      "regression_targets": ["ContentView", "UserLoginView", "SettingsView", "DashboardView", "RecordsListView", "UserManagementView"]
+    },
+    "PermissionManager.swift": {
+      "test_priority": "high",
+      "affects_all": true,
+      "regression_targets": ["ContentView", "SettingsView", "UserManagementView", "PermissionProfileView", "RecordsListView", "TransactionEntryView"]
+    }
+  },
+
+  "manager_map": {
+    "SecurityManager.swift": { "views": ["ContentView", "AuthenticationView", "SettingsView", "DashboardView", "RecordsListView", "TransactionEntryView", "UserManagementView"], "test_all": true },
+    "UserSessionManager.swift": { "views": ["ContentView", "UserLoginView", "DashboardView", "RecordsListView", "SettingsView", "TransactionEntryView", "UserManagementView", "FloatingUserButton"], "test_all": true },
+    "PermissionManager.swift": { "views": ["ContentView", "SettingsView", "UserManagementView", "PermissionProfileView", "RecordsListView", "TransactionEntryView", "DashboardView"], "test_all": true },
+    "ExportManager.swift": { "views": ["RecordsListView", "DashboardView", "SettingsView", "MASFExportOptionsView", "MASFExportProgressView"], "test_all": false },
+    "MASFExportManager.swift": { "views": ["RecordsListView", "DashboardView", "SettingsView", "MASFExportOptionsView"], "test_all": false },
+    "ThermalPrinterManager.swift": { "views": ["SettingsView", "ReceiptPreviewView", "TransactionEntryView"], "test_all": false },
+    "OCRManager.swift": { "views": ["TransactionEntryView", "FormScannerView", "DriverLicenseScannerView", "LTCCardScannerView", "PassportScannerView"], "test_all": false },
+    "AuditLogManager.swift": { "views": ["SettingsView", "AuditLogListView", "UserManagementView", "ContentView"], "test_all": false },
+    "PINManager.swift": { "views": ["SettingsView", "AuthenticationSettingsView", "SetupWizardView", "UserLoginView"], "test_all": false },
+    "NotificationManager.swift": { "views": ["DashboardView", "RecordsListView", "SettingsView"], "test_all": false },
+    "ImageProcessingManager.swift": { "views": ["TransactionEntryView", "FormScannerView", "MASFExportManager", "MASFImportManager"], "test_all": false },
+    "AmmunitionLookupManager.swift": { "views": ["TransactionEntryView", "SettingsView", "CachedUPCListView"], "test_all": false },
+    "MASFImportManager.swift": { "views": ["SettingsView", "MASFImportView"], "test_all": false }
+  },
+
+  "viewmodel_map": {
+    "DashboardViewModel.swift": { "views": ["DashboardView"], "regression_targets": ["AnalyticsView", "ComplianceReportView"] },
+    "RecordsListViewModel.swift": { "views": ["RecordsListView"], "regression_targets": ["AdvancedSearchView", "RecordDetailView", "ExportOptionsView"] },
+    "SettingsViewModel.swift": { "views": ["SettingsView"], "regression_targets": ["AboutView", "MASFExportHistoryView"] },
+    "TransactionEntryViewModel.swift": { "views": ["TransactionEntryView"], "regression_targets": ["ReceiptPreviewView", "ValidationIssuesSheet"] },
+    "UserManagementViewModel.swift": { "views": ["UserManagementView", "UserListView", "UserEditView"], "regression_targets": ["PermissionProfileView", "OwnerTransferView"] },
+    "ReceiptPreviewViewModel.swift": { "views": ["ReceiptPreviewView"], "regression_targets": [] },
+    "QRCodeScannerViewModel.swift": { "views": ["QRCodeScannerView"], "regression_targets": [] }
+  },
+
+  "model_map": {
+    "UserAccount.swift": { "features": ["auth", "user_management", "settings"], "test_tabs": ["settings", "dashboard"] },
+    "PermissionProfile.swift": { "features": ["permissions", "user_management", "settings"], "test_tabs": ["settings"] },
+    "AmmunitionSaleRecord.swift": { "features": ["records", "transactions", "dashboard", "analytics"], "test_tabs": ["dashboard", "records", "new_transaction"] },
+    "Customer.swift": { "features": ["records", "transactions"], "test_tabs": ["records", "new_transaction"] },
+    "AuditLog.swift": { "features": ["audit", "settings"], "test_tabs": ["settings"] },
+    "MASFExportHistory.swift": { "features": ["export", "settings"], "test_tabs": ["settings", "records"] }
+  }
+}

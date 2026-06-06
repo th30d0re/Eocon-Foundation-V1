@@ -1,0 +1,24 @@
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    Tab,
+    ShiftTab,
+    Skip,
+    Abort,
+    Quit,
+    Confirm(bool),
+    ToggleHelp,
+    Tick,
+    Resize(u16, u16),
+    AgentBytes(Vec<u8>),
+    AgentExited(i32),
+    AgentError(String),
+    InputChar(char),
+    InputBackspace,
+    InputSubmit,
+    InputCancel,
+    InputCursorLeft,
+    InputCursorRight,
+    // Command picker navigation
+    PickerUp,
+    PickerDown,
+}

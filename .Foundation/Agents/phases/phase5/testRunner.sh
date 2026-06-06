@@ -137,7 +137,7 @@ EXAMPLES:
     $0 --record --video-quality high
 
     # Parallel execution on multiple simulators
-    $0 --parallel --destinations "iPhone 15,iPhone 15 Pro"
+    $0 --parallel --destinations "iPhone 17 Pro Max,iPhone 17 Pro"
 
     # Using test plan
     $0 --test-plan Tests.xctestplan
@@ -341,7 +341,7 @@ get_booted_simulator() {
 
 # Boot a simulator if needed
 ensure_simulator_booted() {
-    local destination="${1:-platform=iOS Simulator,name=iPhone 15}"
+    local destination="${1:-}"
 
     SIMULATOR_UDID=$(get_booted_simulator)
 
@@ -351,7 +351,10 @@ ensure_simulator_booted() {
         # Extract device name from destination
         local device_name
         device_name=$(echo "$destination" | grep -o "name=[^,]*" | cut -d= -f2)
-        device_name="${device_name:-iPhone 15}"
+        if [ -z "$device_name" ]; then
+            device_name=$(detect_available_simulator)
+            [ -z "$device_name" ] && device_name="iPhone 16"
+        fi
 
         # Get UDID for device
         local udid
@@ -486,7 +489,10 @@ build_test_command() {
             cmd="$cmd -destination 'platform=iOS Simulator,name=$dest'"
         done
     else
-        cmd="$cmd -destination 'platform=iOS Simulator,name=iPhone 15'"
+        local sim_name
+        sim_name=$(detect_available_simulator)
+        [ -z "$sim_name" ] && sim_name="iPhone 16"
+        cmd="$cmd -destination 'platform=iOS Simulator,name=$sim_name'"
     fi
 
     # Parallel execution

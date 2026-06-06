@@ -501,7 +501,58 @@ has_unicode() {
     [ "$_TERMINAL_UNICODE" = "true" ]
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Block Color Helpers (for interaction pane voice separation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ANSI 256-color background tints for full-block coloring
+# Used in the interaction pane to distinguish user commands vs agent messages
+BLOCK_COLORS_AVAILABLE="false"
+
+_detect_block_color_support() {
+    detect_terminal_capabilities
+    if [ "$_TERMINAL_256_COLOR" = "true" ] || [ "$_TERMINAL_TRUE_COLOR" = "true" ]; then
+        BLOCK_COLORS_AVAILABLE="true"
+    fi
+}
+
+# Get ANSI escape sequence for a block background color
+# Usage: apply_block_color <voice> <text>
+# Voices: user, agent, error, warning, shell, neutral
+apply_block_color() {
+    local voice="$1"
+    local text="$2"
+
+    if [ -n "${NO_COLOR:-}" ] || [ "$BLOCK_COLORS_AVAILABLE" = "false" ]; then
+        printf '%s' "$text"
+        return 0
+    fi
+
+    local bg=""
+    case "$voice" in
+        user)    bg="48;5;22"  ;;  # subtle green
+        agent)   bg="48;5;17"  ;;  # subtle blue
+        error)   bg="48;5;52"  ;;  # subtle red
+        warning) bg="48;5;58"  ;;  # subtle yellow
+        shell)   bg="48;5;28"  ;;  # slightly brighter green for shell output
+        neutral) bg="48;5;235" ;;  # dark gray
+        *)       bg=""         ;;
+    esac
+
+    if [ -n "$bg" ]; then
+        printf '\033[%sm%s\033[0m' "$bg" "$text"
+    else
+        printf '%s' "$text"
+    fi
+}
+
+# Alias for readability
+reset_block_color() { printf '\033[0m'; }
+
 # Auto-initialize with default theme on source
 if [ "${BUILDAGENT_THEME:-}" != "" ]; then
     select_theme "$BUILDAGENT_THEME"
 fi
+
+# Detect block color support on source
+_detect_block_color_support

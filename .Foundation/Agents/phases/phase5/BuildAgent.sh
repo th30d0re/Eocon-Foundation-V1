@@ -24,6 +24,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Expand bare ~ in BUILDAGENT_USE_CWD (mirrors XcodeBuildMCP XCODEBUILDMCP_CWD fix)
+BUILDAGENT_USE_CWD="${BUILDAGENT_USE_CWD:-}"
 BUILDAGENT_USE_CWD="${BUILDAGENT_USE_CWD/#\~/$HOME}"
 
 # When script is in PATH, use current working directory as project root
@@ -181,7 +182,20 @@ XCODE_PROJECT=""    # Auto-detected project path
 # Repair loop configuration
 MAX_REPAIR_ATTEMPTS="${MAX_REPAIR_ATTEMPTS:-3}"
 CURRENT_ATTEMPT=0
+MAX_TIMEOUT_RETRIES="${MAX_TIMEOUT_RETRIES:-3}"  # Cap timeout retries to avoid infinite loops
+TIMEOUT_RETRY_COUNT=0
 REPAIR_FROM_ERRORS_FILE=""  # Path to argent errors JSON file (set by --repair-from-errors)
+PLANS_DIR=""               # Directory containing multiple plan files to execute sequentially
+PLAN_FILES=()              # Ordered list of discovered plan files
+
+# Build-first mode: run build before AI loop, skip AI if build already passes
+BUILD_FIRST_MODE="${BUILD_FIRST_MODE:-false}"
+
+# Todo file: inject todo items into AI prompt and track completion
+TODO_FILE="${TODO_FILE:-}"
+
+# Force mode: skip state check and re-run even if previously completed
+FORCE_RUN="${FORCE_RUN:-false}"
 
 # Session configuration (maintains context between attempts)
 SESSION_ID=""
@@ -190,6 +204,7 @@ CURSOR_CHAT_ID=""  # Cursor CLI chat session ID for --resume
 AI_PROVIDER="${AI_PROVIDER:-copilot}"  # AI CLI provider: copilot, codex, cursor, claude, gemini
 AI_CMD=""          # Detected AI CLI command
 AI_MODEL="${AI_MODEL:-}"  # Specific AI model (provider-dependent)
+PROVIDER_STRATEGY="${PROVIDER_STRATEGY:-auto}"  # auto | ucb1 | thompson | epsilon-greedy | explore-then-commit | round-robin
 
 # Flags
 VERBOSE="${VERBOSE:-false}"
@@ -197,10 +212,21 @@ DRY_RUN="${DRY_RUN:-false}"
 SKIP_LINT="${SKIP_LINT:-false}"
 STREAM_OUTPUT="${STREAM_OUTPUT:-true}"
 CURSOR_STREAM_SUPPORTED="false"
+STREAM_HEARTBEAT_INTERVAL="${STREAM_HEARTBEAT_INTERVAL:-15}"  # Seconds between stream status updates
+STREAM_HEARTBEAT_ENABLED="${STREAM_HEARTBEAT_ENABLED:-true}"  # Set to false to disable stream heartbeat
+STREAM_ZERO_BYTES_TIMEOUT="${STREAM_ZERO_BYTES_TIMEOUT:-60}"  # Kill provider if 0 bytes for this many seconds
+STREAM_MAX_TOTAL_TIME="${STREAM_MAX_TOTAL_TIME:-300}"  # Hard cap on total generation time
+STREAM_TIMELINE_FILE=""  # Populated during streaming runs
+AI_LAST_TIMEOUT="false"  # Set to true when AI CLI times out (zero bytes)
+AI_LAST_TIMEOUT_TYPE="timeout"  # "timeout" = zero bytes, "stall" = partial output then stopped
 SKIP_CHAT_ID_CAPTURE="${SKIP_CHAT_ID_CAPTURE:-false}"  # Skip cursor chat ID capture (can be slow/unreliable)
 YOLO_MODE="${YOLO_MODE:-false}"  # Automation mode: enables verbose, skip-chat-id, stream output
 LINT_ONLY_MODE="${LINT_ONLY_MODE:-false}"  # No AI input - just run lint and build
+SIDEBAR_MODE="${SIDEBAR_MODE:-false}"  # Enable persistent top status bar (sidebar UI)
+SIDEBAR_STAGE="Initializing"  # Current stage displayed in sidebar
+CURRENT_PLAN_INDEX=0  # Index of current plan in sequence
 SMART_DOCS="${SMART_DOCS:-true}"  # Use cursor-agent RAG to filter relevant swift docs
+MAX_CONTEXT_CHARS="${MAX_CONTEXT_CHARS:-400000}"  # Hard cap on gathered context sent to AI (~400KB)
 
 # Verbosity control
 LOG_LEVEL="${LOG_LEVEL:-info}"  # error, warning, info, debug
@@ -351,7 +377,10 @@ output_json_result() {
     local output="$2"
     local error="${3:-null}"
     local duration="${4:-0}"
-    local extra_metadata="${5:-{}}"
+    local extra_metadata="$5"
+    if [ -z "$extra_metadata" ]; then
+        extra_metadata="{}"
+    fi
     local next_steps="${6:-[]}"
 
     if [ "$JSON_OUTPUT" != "true" ]; then
@@ -695,8 +724,12 @@ update_spinner() {
     start_spinner "$message"
 }
 
-# Cleanup on exit (spinner + build queue locks)
+# Cleanup on exit (spinner + build queue locks + sidebar)
 cleanup_all() {
+    # Disable sidebar mode before exit
+    if [ "${SIDEBAR_MODE_ACTIVE:-false}" = "true" ]; then
+        disable_sidebar_mode 2>/dev/null || true
+    fi
     # Stop both legacy and enhanced spinners
     stop_spinner 2>/dev/null || true
     if [ "${BUILDAGENT_FANCY_UI:-false}" = "true" ] && type stop_enhanced_spinner &>/dev/null; then
@@ -708,6 +741,14 @@ cleanup_all() {
     fi
 }
 trap cleanup_all EXIT INT TERM
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar Mode (persistent top status bar)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SIDEBAR_DAEMON_PID=""
+SIDEBAR_MODE_ACTIVE="false"
+SIDEBAR_HEIGHT=2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Unbuffered Output Functions (for streaming mode)
@@ -893,6 +934,8 @@ USAGE:
 
 INPUT OPTIONS (optional - if none provided, runs lint/build only):
     --plan <file.md>        Path to plan markdown file
+    --plans-dir <dir>       Directory containing multiple plans to execute sequentially
+                            Looks for sequence.md for custom order, or auto-discovers *.md
     --prompt <file.txt>     Path to prompt text file
     --prompt-string <str>   Prompt string directly (or use stdin)
     --stdin                 Read prompt from stdin
@@ -937,6 +980,7 @@ AI PROVIDER OPTIONS:
                               aider   - Aider AI pair programming
                               letta   - Letta stateful agents (persistent memory)
                               copilot - GitHub Copilot CLI
+                              kimi    - Moonshot Kimi Code CLI
 
                             Auto-installation:
                               If a provider is not installed, the script will
@@ -953,10 +997,14 @@ AI PROVIDER OPTIONS:
                               gemini  → --yolo
                               aider   → --yes
                               letta   → --yolo
+                              kimi    → --yolo
 
     --ai-model <model>      Specific AI model to use (provider-dependent)
                             Example: --ai-model gemini-2.0-pro
                             For Letta: set LETTA_MODEL env var instead
+
+    --provider-strategy <s> Provider selection strategy (default: auto)
+                            auto, ucb1, thompson, epsilon-greedy, explore-then-commit, round-robin
 
 BUILD OPTIONS:
     --target-id <id>        Device/Simulator UDID (e.g., 00008150-001D5822210A401C)
@@ -973,8 +1021,16 @@ EXECUTION OPTIONS:
     --max-attempts <n>      Max repair attempts (default: 3)
     --artifacts-dir <dir>   Artifacts output directory
     --stream                Stream AI CLI output in real-time
+    --no-stream-heartbeat   Disable periodic heartbeat/status updates during streaming
+    --sidebar               Enable persistent sidebar status bar (interactive terminals only)
     --yolo                  Automation mode: max-attempts=5, verbose, skip-chat-id, streaming
     --skip-chat-id          Skip cursor chat ID capture (faster, but no session resume)
+    --skip-stage            Auto-skip interactive stage prompts
+    --parallel-platforms    Enable parallel multi-platform builds (default: auto)
+    --max-parallel-platforms <n>  Max concurrent platform builds (default: all detected)
+    --build-first           Run build BEFORE AI loop; skip AI if build passes
+    --todo-file <file.md>   Inject todo items into AI prompt and track completion
+    --force                 Re-run even if prompt was previously completed
     --dry-run               Show what would be done without executing
     --verbose               Enable verbose output
     --no-defaults           Skip loading defaults.conf (for testing)
@@ -1016,6 +1072,7 @@ AUTHENTICATION:
       aider:   export OPENAI_API_KEY=... or ANTHROPIC_API_KEY=...
       letta:   export LETTA_API_KEY=letta-...
                Optional: export LETTA_BASE_URL=http://localhost:8283 (self-hosted)
+      kimi:    export KIMI_API_KEY=sk-... or run: kimi login
       copilot: Uses GitHub authentication (gh auth login)
 
 ENVIRONMENT VARIABLES:
@@ -1214,8 +1271,8 @@ validate_inputs() {
     start_spinner "Validating configuration"
 
     # Check if any input is provided - if not, run in lint-only mode
-    # REPAIR_FROM_ERRORS_FILE is AI-driven even though it carries no prompt text
-    if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ] && [ -z "$PROMPT_CONTENT" ] && [ -z "$REPAIR_FROM_ERRORS_FILE" ]; then
+    # REPAIR_FROM_ERRORS_FILE and PLANS_DIR are AI-driven even though they carry no prompt text
+    if [ -z "$PLAN_FILE" ] && [ -z "$PROMPT_FILE" ] && [ -z "$PROMPT_STRING" ] && [ -z "$PROMPT_CONTENT" ] && [ -z "$REPAIR_FROM_ERRORS_FILE" ] && [ -z "$PLANS_DIR" ]; then
         LINT_ONLY_MODE="true"
         log_info "No AI input provided - running in auto-detect mode (build first, AI repair if needed)"
     fi
@@ -1224,6 +1281,13 @@ validate_inputs() {
     if [ -n "$REPAIR_FROM_ERRORS_FILE" ]; then
         LINT_ONLY_MODE="false"
         log_verbose "Repair-from-errors mode: AI provider required"
+    fi
+
+    # Validate plans directory if provided
+    if [ -n "$PLANS_DIR" ] && [ ! -d "$PLANS_DIR" ]; then
+        spinner_error "Validating configuration"
+        log_error "Plans directory not found: $PLANS_DIR"
+        return 1
     fi
 
     # Validate plan file if provided (skip if already cached)
@@ -1320,14 +1384,14 @@ validate_inputs() {
             log_warning "Output may appear delayed or buffered"
         fi
 
-        # Log provider streaming capability
+        # Log provider streaming capability (only warn when streaming was explicitly requested)
         case "$AI_PROVIDER" in
             cursor)
-                if [ "$AI_CMD" = "cursor-agent" ]; then
+                if [ "$AI_CMD" = "cursor-agent" ] && [ "$STREAM_OUTPUT" = "true" ]; then
                     if [ "$CURSOR_STREAM_SUPPORTED" = "true" ]; then
-                        log_verbose "Using cursor-agent native --stream flag"
+                        log_verbose "Using cursor-agent --stream-partial-output with stream-json"
                     else
-                        log_warning "cursor-agent --stream not supported; falling back to standard output"
+                        log_warning "cursor-agent streaming not supported; falling back to standard output"
                     fi
                 fi
                 ;;
@@ -2137,20 +2201,11 @@ init_letta_directory_agent() {
     fi
 }
 
-# Detect whether cursor-agent supports the --stream flag
+# Detect whether cursor-agent supports streaming output
+# NOTE: cursor-agent has --stream-partial-output (requires --output-format stream-json).
+# The stream-json parsing pipeline is now wired up (shared with Kimi provider).
 detect_cursor_stream_support() {
-    CURSOR_STREAM_SUPPORTED="false"
-
-    if [ "$AI_CMD" != "cursor-agent" ]; then
-        return 0
-    fi
-
-    local help_output=""
-    if help_output=$(cursor-agent --help 2>/dev/null); then
-        if echo "$help_output" | grep -q -- '--stream'; then
-            CURSOR_STREAM_SUPPORTED="true"
-        fi
-    fi
+    CURSOR_STREAM_SUPPORTED="true"
 }
 
 # Detect and configure AI CLI provider
@@ -2167,6 +2222,19 @@ detect_ai_provider() {
                 AI_CMD="cursor-agent"
                 detect_cursor_stream_support
                 log_info "Using Cursor AI (cursor-agent)"
+                # Pre-flight auth check using models endpoint (fast, non-interactive)
+                local _auth_check
+                if _auth_check=$(timeout 8 cursor-agent models 2>&1); then
+                    log_verbose "cursor-agent authenticated"
+                else
+                    if echo "$_auth_check" | grep -qi "authentication required\|agent login\|api.key\|not logged"; then
+                        log_error "cursor-agent is not authenticated."
+                        log_info "Run: cursor-agent login"
+                        log_info "Or:  export CURSOR_API_KEY=<your_key>  (from cursor.com/settings)"
+                        return 1
+                    fi
+                    log_verbose "cursor-agent auth check inconclusive (timeout or network) — proceeding"
+                fi
                 return 0
             elif command -v cursor >/dev/null 2>&1; then
                 AI_CMD="cursor agent"
@@ -2297,12 +2365,113 @@ detect_ai_provider() {
             return 1
             ;;
 
+        kimi|kimi-code|moonshot)
+            # Kimi Code CLI - Moonshot AI's CLI agent
+            if command -v kimi >/dev/null 2>&1; then
+                AI_CMD="kimi"
+                log_info "Using Kimi Code CLI (moonshot-ai)"
+                # Pre-flight auth check
+                local _auth_check
+                if _auth_check=$(timeout 8 kimi info 2>&1); then
+                    log_verbose "Kimi CLI authenticated"
+                else
+                    if echo "$_auth_check" | grep -qi "authentication required\|login required\|not logged\|unauthorized"; then
+                        log_error "Kimi CLI is not authenticated."
+                        log_info "Run: kimi login"
+                        log_info "Or:  export KIMI_API_KEY=<your_key>"
+                        return 1
+                    fi
+                    log_verbose "Kimi auth check inconclusive (timeout or network) — proceeding"
+                fi
+                return 0
+            else
+                log_error "Kimi CLI not found. Install from https://moonshotai.github.io/kimi-cli/"
+                log_info "Install: curl -sSL https://install.kimi.com | sh"
+                log_info "Or:     npm install -g @moonshotai/kimi-cli"
+                return 1
+            fi
+            ;;
+
         *)
             log_error "Unknown AI provider: $provider"
-            log_info "Supported providers: cursor, claude, codex, gemini, aider, letta, copilot"
+            log_info "Supported providers: cursor, claude, codex, gemini, aider, letta, copilot, kimi"
             return 1
             ;;
     esac
+}
+
+# Switch to the next available AI provider using bandit strategy or round-robin
+switch_ai_provider() {
+    local current="$AI_PROVIDER"
+    local next_provider=""
+
+    # Use bandit strategy if available and strategy is not round-robin
+    if [ "$PROVIDER_STRATEGY" != "round-robin" ] && command -v select_provider_auto >/dev/null 2>&1; then
+        case "$PROVIDER_STRATEGY" in
+            ucb1)
+                next_provider=$(select_provider_ucb1 0.5 2>/dev/null)
+                ;;
+            thompson)
+                next_provider=$(select_provider_thompson 2>/dev/null)
+                ;;
+            epsilon-greedy)
+                next_provider=$(select_provider_epsilon_greedy 0.3 0.95 2>/dev/null)
+                ;;
+            explore-then-commit)
+                next_provider=$(select_provider_explore_then_commit 2 2>/dev/null)
+                ;;
+            auto|*)
+                next_provider=$(select_provider_auto 2>/dev/null)
+                ;;
+        esac
+
+        # Ensure we don't pick the same provider that just timed out
+        if [ "$next_provider" = "$current" ]; then
+            next_provider=""
+        fi
+    fi
+
+    # Fallback to round-robin if bandit didn't produce a different provider
+    if [ -z "$next_provider" ]; then
+        local providers=("cursor" "kimi" "codex" "gemini" "claude" "aider" "copilot")
+        local found=false
+        for p in "${providers[@]}"; do
+            if [ "$found" = "true" ]; then
+                if command -v "$p" >/dev/null 2>&1 || \
+                   ( [ "$p" = "cursor" ] && (command -v cursor-agent >/dev/null 2>&1 || command -v cursor >/dev/null 2>&1) ); then
+                    next_provider="$p"
+                    break
+                fi
+            fi
+            if [ "$p" = "$current" ]; then
+                found=true
+            fi
+        done
+        # Wrap around
+        if [ -z "$next_provider" ]; then
+            for p in "${providers[@]}"; do
+                if [ "$p" != "$current" ]; then
+                    if command -v "$p" >/dev/null 2>&1 || \
+                       ( [ "$p" = "cursor" ] && (command -v cursor-agent >/dev/null 2>&1 || command -v cursor >/dev/null 2>&1) ); then
+                        next_provider="$p"
+                        break
+                    fi
+                fi
+            done
+        fi
+    fi
+
+    if [ -n "$next_provider" ] && [ "$next_provider" != "$current" ]; then
+        log_warning "Switching AI provider: $current → $next_provider (strategy: $PROVIDER_STRATEGY)"
+        AI_PROVIDER="$next_provider"
+        AI_CMD=""
+        if detect_ai_provider; then
+            return 0
+        fi
+    fi
+
+    log_error "No alternative AI provider available after timeout"
+    return 1
 }
 
 # Check for authentication errors in AI CLI output
@@ -2344,10 +2513,11 @@ check_auth_error() {
             # Provider-specific instructions
             case "$provider" in
                 cursor)
-                    log_info "To authenticate Cursor:"
-                    echo "  1. Open Cursor application" >&2
-                    echo "  2. Sign in with your account" >&2
-                    echo "  3. Try running: cursor-agent --help" >&2
+                    log_info "To authenticate cursor-agent CLI:"
+                    echo "  1. Run: cursor-agent login" >&2
+                    echo "     (opens browser to authenticate the CLI separately from the IDE)" >&2
+                    echo "  2. Or set: export CURSOR_API_KEY=<your_api_key>" >&2
+                    echo "     (get key from: https://cursor.com/settings → API Keys)" >&2
                     ;;
                 claude)
                     log_info "To authenticate Claude CLI:"
@@ -2390,6 +2560,12 @@ check_auth_error() {
                     echo "  2. Run: gh auth login (or copilot auth if standalone)" >&2
                     echo "  3. Ensure you have a GitHub Copilot subscription" >&2
                     echo "  4. Install: npm install -g @github/copilot" >&2
+                    ;;
+                kimi|kimi-code|moonshot)
+                    log_info "To authenticate Kimi CLI:"
+                    echo "  1. Run: kimi login" >&2
+                    echo "  2. Or set: export KIMI_API_KEY=<your_key>" >&2
+                    echo "  3. Install: curl -sSL https://install.kimi.com | sh" >&2
                     ;;
             esac
 
@@ -2660,6 +2836,610 @@ $(cat "$md_file")
 }
 
 # Gather all context into a single string
+# Context cache directory (shared with test agents)
+CONTEXT_CACHE_DIR="${ARTIFACTS_DIR:-./Artifacts}/.context_cache"
+
+# Offer user a chance to skip context gathering before it starts
+# Returns: 0 if user chose to skip, 1 otherwise
+prompt_skip_context() {
+    local description="${1:-context gathering}"
+
+    # Only prompt if running interactively
+    if [ ! -t 0 ]; then
+        return 1
+    fi
+
+    # Respect env flag to disable prompt (for CI/automation)
+    if [ "${SKIP_CONTEXT_PROMPT:-false}" = "true" ]; then
+        return 1
+    fi
+
+    local timeout_secs=3
+    local spin_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    local spin_len=${#spin_chars}
+    echo "" >&2
+    log_info "$description starting..."
+
+    (
+        local elapsed=0
+        local spin_idx=0
+        while [ $elapsed -lt $timeout_secs ]; do
+            local spin_char="${spin_chars:spin_idx:1}"
+            local remaining=$((timeout_secs - elapsed))
+            printf "\r\033[K\033[36m[%s]\033[0m Press \033[1m's'\033[0m to skip %s (%ds left)" "$spin_char" "$description" "$remaining" >&2
+            spin_idx=$(((spin_idx + 1) % spin_len))
+            sleep 0.15
+            local _tmp=$((elapsed * 100 + 15))
+            if [ "$_tmp" -ge $(((elapsed + 1) * 100)) ]; then
+                elapsed=$((elapsed + 1))
+            fi
+        done
+        printf "\r\033[K" >&2
+    ) &
+    local spinner_pid=$!
+
+    local key=""
+    if IFS= read -rs -t $timeout_secs -n 1 key 2>/dev/null; then
+        kill "$spinner_pid" 2>/dev/null
+        wait "$spinner_pid" 2>/dev/null
+        printf "\r\033[K" >&2
+        if [ "$key" = "s" ] || [ "$key" = "S" ]; then
+            echo "" >&2
+            log_info "Skipping $description"
+            echo "" >&2
+            return 0
+        fi
+    fi
+
+    kill "$spinner_pid" 2>/dev/null
+    wait "$spinner_pid" 2>/dev/null
+    printf "\r\033[K" >&2
+    echo "" >&2
+    return 1
+}
+
+# Compute cache key for BuildAgent context (includes prompt hash + settings)
+_compute_context_cache_key() {
+    local input_content="$1"
+    local key_input=""
+
+    # Hash of input/prompt
+    if command -v md5 >/dev/null 2>&1; then
+        key_input=$(echo "$input_content" | md5)
+    elif command -v md5sum >/dev/null 2>&1; then
+        key_input=$(echo "$input_content" | md5sum | awk '{print $1}')
+    else
+        key_input=$(echo "$input_content" | tr -dc '[:alnum:]._-' | head -c 32)
+    fi
+
+    # Add settings that affect context selection
+    key_input+="|SMART_DOCS=${SMART_DOCS:-true}"
+    key_input+="|SWIFT_DOCS_PATH=${SWIFT_DOCS_PATH:-}"
+    for p in "${CONTEXT_PATHS[@]}"; do
+        key_input+="|CTX=${p}"
+    done
+
+    echo "$key_input"
+}
+
+# Save gathered context to disk cache with manifest
+_save_context_cache() {
+    local key="$1"
+    local context="$2"
+
+    mkdir -p "$CONTEXT_CACHE_DIR"
+    echo "$context" > "${CONTEXT_CACHE_DIR}/build_context.txt"
+    echo "$key" > "${CONTEXT_CACHE_DIR}/build_key.txt"
+
+    # Build manifest of all source paths
+    local manifest="${CONTEXT_CACHE_DIR}/build_manifest.txt"
+    > "$manifest"
+
+    if [ -n "$SWIFT_DOCS_PATH" ] && [ "$SWIFT_DOCS_PATH" != "DISABLED" ] && [ -d "$SWIFT_DOCS_PATH" ]; then
+        # For swift docs directory, track newest .md mtime
+        local latest_mtime
+        latest_mtime=$(find "$SWIFT_DOCS_PATH" -maxdepth 2 -name "*.md" -type f -exec stat -f %m {} + 2>/dev/null | sort -rn | head -1 || echo "0")
+        echo "D|${SWIFT_DOCS_PATH}|${latest_mtime}|0" >> "$manifest"
+    fi
+
+    for ctx_path in "${CONTEXT_PATHS[@]}"; do
+        if [ -f "$ctx_path" ]; then
+            local mtime size
+            mtime=$(stat -f %m "$ctx_path" 2>/dev/null || stat -c %Y "$ctx_path" 2>/dev/null || echo "0")
+            size=$(stat -f %z "$ctx_path" 2>/dev/null || stat -c %s "$ctx_path" 2>/dev/null || echo "0")
+            echo "F|${ctx_path}|${mtime}|${size}" >> "$manifest"
+        elif [ -d "$ctx_path" ]; then
+            local latest_mtime
+            latest_mtime=$(find "$ctx_path" -maxdepth 2 -name "*.md" -type f -exec stat -f %m {} + 2>/dev/null | sort -rn | head -1 || echo "0")
+            echo "D|${ctx_path}|${latest_mtime}|0" >> "$manifest"
+        fi
+    done
+}
+
+# Load cached context if key and all mtimes match
+_load_context_cache() {
+    local key="$1"
+
+    local context_file="${CONTEXT_CACHE_DIR}/build_context.txt"
+    local key_file="${CONTEXT_CACHE_DIR}/build_key.txt"
+    local manifest="${CONTEXT_CACHE_DIR}/build_manifest.txt"
+
+    if [ ! -f "$context_file" ] || [ ! -f "$key_file" ] || [ ! -f "$manifest" ]; then
+        return 1
+    fi
+
+    local cached_key
+    cached_key=$(cat "$key_file" 2>/dev/null || echo "")
+    if [ "$cached_key" != "$key" ]; then
+        log_verbose "Build context cache key mismatch, regathering..."
+        return 1
+    fi
+
+    while IFS='|' read -r type path mtime size; do
+        if [ "$type" = "F" ]; then
+            if [ ! -f "$path" ]; then
+                log_verbose "Build context cache stale: missing file $path"
+                return 1
+            fi
+            local current_mtime current_size
+            current_mtime=$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo "0")
+            current_size=$(stat -f %z "$path" 2>/dev/null || stat -c %s "$path" 2>/dev/null || echo "0")
+            if [ "$current_mtime" != "$mtime" ] || [ "$current_size" != "$size" ]; then
+                log_verbose "Build context cache stale: modified file $path"
+                return 1
+            fi
+        elif [ "$type" = "D" ]; then
+            if [ ! -d "$path" ]; then
+                log_verbose "Build context cache stale: missing directory $path"
+                return 1
+            fi
+            local current_mtime
+            current_mtime=$(find "$path" -maxdepth 2 -name "*.md" -type f -exec stat -f %m {} + 2>/dev/null | sort -rn | head -1 || echo "0")
+            if [ "$current_mtime" != "$mtime" ]; then
+                log_verbose "Build context cache stale: modified directory $path"
+                return 1
+            fi
+        fi
+    done < "$manifest"
+
+    log_info "Using cached context (sources unchanged since last gather)"
+    cat "$context_file"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build Session State Persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+BUILD_STATE_DIR="${ARTIFACTS_DIR:-./Artifacts}/.buildagent_state"
+
+# Compute a stable hash for a prompt string
+# Usage: compute_prompt_hash <prompt_string>
+compute_prompt_hash() {
+    local input="$1"
+    if [ -z "$input" ]; then
+        echo ""
+        return 0
+    fi
+    # Normalize: trim leading/trailing whitespace, collapse whitespace
+    local normalized
+    normalized=$(echo "$input" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -s '[:space:]')
+    printf '%s' "$normalized" | md5 2>/dev/null || printf '%s' "$normalized" | md5sum 2>/dev/null | awk '{print $1}' || echo ""
+}
+
+# Load saved build state for a given prompt hash
+# Usage: load_build_state <prompt_hash>
+# Returns: echoes JSON content if found, empty otherwise
+load_build_state() {
+    local prompt_hash="$1"
+    local state_file="${BUILD_STATE_DIR}/${prompt_hash}.json"
+    if [ -f "$state_file" ]; then
+        cat "$state_file"
+    fi
+}
+
+# Save build state for a given prompt hash
+# Usage: save_build_state <prompt_hash> <status> [todos_json]
+# status: "completed", "partial", "failed"
+save_build_state() {
+    local prompt_hash="$1"
+    local status="$2"
+    local todos_json="${3:-[]}"
+    local input_content
+    input_content=$(get_input_content)
+    local preview=""
+    if [ -n "$input_content" ]; then
+        preview=$(echo "$input_content" | head -c 120 | tr -d '\n')
+    fi
+
+    mkdir -p "$BUILD_STATE_DIR"
+    local state_file="${BUILD_STATE_DIR}/${prompt_hash}.json"
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -n \
+            --arg hash "$prompt_hash" \
+            --arg status "$status" \
+            --arg preview "$preview" \
+            --arg session "$SESSION_ID" \
+            --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --argjson todos "$todos_json" \
+            '{prompt_hash: $hash, status: $status, prompt_preview: $preview, session_id: $session, timestamp: $timestamp, todos: $todos}' > "$state_file"
+    else
+        # Fallback without jq
+        cat > "$state_file" << EOF
+{
+  "prompt_hash": "$prompt_hash",
+  "status": "$status",
+  "prompt_preview": "$preview",
+  "session_id": "$SESSION_ID",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "todos": $todos_json
+}
+EOF
+    fi
+    log_verbose "Build state saved: $state_file"
+}
+
+# Check if a prompt was already completed in a previous session
+# Usage: check_prompt_already_done <prompt>
+# Returns: 0 if already done, 1 otherwise
+check_prompt_already_done() {
+    local prompt="$1"
+    local prompt_hash
+    prompt_hash=$(compute_prompt_hash "$prompt")
+    local state
+    state=$(load_build_state "$prompt_hash")
+
+    if [ -z "$state" ]; then
+        return 1
+    fi
+
+    local status
+    if command -v jq >/dev/null 2>&1; then
+        status=$(echo "$state" | jq -r '.status' 2>/dev/null || echo "")
+    else
+        status=$(echo "$state" | grep '"status"' | sed 's/.*"status".*"\([^"]*\)".*/\1/')
+    fi
+
+    if [ "$status" = "completed" ]; then
+        log_info "Previous session found for this prompt ($prompt_hash) — status: completed"
+        return 0
+    fi
+
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Forward Search / MCTS for Repair Planning
+# ─────────────────────────────────────────────────────────────────────────────
+
+REPAIR_STRATEGY_REGISTRY="${ARTIFACTS_DIR:-./Artifacts}/.repair_strategies.json"
+
+# Classify build errors into pattern categories
+classify_error_pattern() {
+    local errors="$1"
+    if [ -z "$errors" ]; then
+        echo "unknown"
+        return 0
+    fi
+    if echo "$errors" | grep -qiE "cannot convert|type.*mismatch|expected.*found.*type"; then
+        echo "type_error"
+    elif echo "$errors" | grep -qiE "no such module|unresolved identifier|use of unresolved"; then
+        echo "missing_import"
+    elif echo "$errors" | grep -qiE "does not conform to protocol|protocol.*requirement"; then
+        echo "protocol_conformance"
+    elif echo "$errors" | grep -qiE "inaccessible.*protection|internal.*access|private.*access"; then
+        echo "access_control"
+    elif echo "$errors" | grep -qiE "unexpectedly found nil|force unwrap|optional.*unwrapped"; then
+        echo "nil_unwrap"
+    elif echo "$errors" | grep -qiE "expected expression|missing brace|syntax error"; then
+        echo "syntax"
+    elif echo "$errors" | grep -qiE "generic.*specialization|type.*parameter.*inferred"; then
+        echo "generic"
+    else
+        echo "other"
+    fi
+}
+
+# Select best repair strategy for an error pattern using UCB1-like exploration
+select_repair_strategy() {
+    local error_pattern="$1"
+    local registry="$REPAIR_STRATEGY_REGISTRY"
+
+    if [ ! -f "$registry" ] || ! command -v jq >/dev/null 2>&1; then
+        echo "minimal_fix"
+        return 0
+    fi
+
+    local strategies
+    strategies=$(jq -r ".patterns.\"$error_pattern\".strategies // {}" "$registry" 2>/dev/null)
+    if [ -z "$strategies" ] || [ "$strategies" = "{}" ]; then
+        echo "minimal_fix"
+        return 0
+    fi
+
+    # UCB1 selection across strategies for this pattern
+    local best_strategy=""
+    local best_score=-1
+    local total_pulls
+    total_pulls=$(echo "$strategies" | jq '[.[] | (.successes + .failures)] | add' 2>/dev/null || echo "0")
+    if [ -z "$total_pulls" ] || [ "$total_pulls" = "0" ] || [ "$total_pulls" = "null" ]; then
+        total_pulls=1
+    fi
+
+    while IFS= read -r line; do
+        local strategy="${line%%$'\t'*}"
+        local stats="${line#*$'\t'}"
+        local successes=$(echo "$stats" | jq '.successes // 0')
+        local failures=$(echo "$stats" | jq '.failures // 0')
+        local pulls=$((successes + failures))
+
+        if [ $pulls -eq 0 ]; then
+            echo "$strategy"  # Unexplored strategy — prioritize
+            return 0
+        fi
+
+        local mean_reward
+        mean_reward=$(awk "BEGIN {print $successes / $pulls}")
+        local ucb
+        ucb=$(awk -v mean="$mean_reward" -v total="$total_pulls" -v pulls="$pulls" \
+              'BEGIN {print mean + 1.414 * sqrt(log(total) / pulls)}')
+
+        if [ "$best_score" = "-1" ] || [ "$(awk -v a="$ucb" -v b="$best_score" 'BEGIN {print (a > b) ? 1 : 0}')" -eq 1 ]; then
+            best_score="$ucb"
+            best_strategy="$strategy"
+        fi
+    done <<< "$(echo "$strategies" | jq -r 'to_entries[] | "\(.key)\t\(.value)"' 2>/dev/null)"
+
+    if [ -n "$best_strategy" ]; then
+        echo "$best_strategy"
+    else
+        echo "minimal_fix"
+    fi
+}
+
+# Record success or failure of a repair strategy
+record_repair_result() {
+    local error_pattern="$1"
+    local strategy="$2"
+    local result="$3"  # success or failure
+    local registry="$REPAIR_STRATEGY_REGISTRY"
+
+    mkdir -p "$(dirname "$registry")"
+    if [ ! -f "$registry" ]; then
+        echo '{"patterns":{}}' > "$registry"
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    if [ "$result" = "success" ]; then
+        jq --arg p "$error_pattern" --arg s "$strategy" \
+           '.patterns[$p] //= {"strategies":{}} | .patterns[$p].strategies[$s] //= {"successes":0,"failures":0} | .patterns[$p].strategies[$s].successes += 1' \
+           "$registry" > "$tmp_file" 2>/dev/null || cat "$registry" > "$tmp_file"
+    else
+        jq --arg p "$error_pattern" --arg s "$strategy" \
+           '.patterns[$p] //= {"strategies":{}} | .patterns[$p].strategies[$s] //= {"successes":0,"failures":0} | .patterns[$p].strategies[$s].failures += 1' \
+           "$registry" > "$tmp_file" 2>/dev/null || cat "$registry" > "$tmp_file"
+    fi
+
+    mv "$tmp_file" "$registry"
+}
+
+# Build follow-up prompt with a specific repair strategy
+build_followup_prompt_with_strategy() {
+    local error_feedback="$1"
+    local attempt_num="$2"
+    local original_task="$3"
+    local context="$4"
+    local strategy="$5"
+
+    local strategy_instructions=""
+    case "$strategy" in
+        minimal_fix)
+            strategy_instructions="Apply the MINIMAL possible fix — change only what's necessary to resolve the reported errors. Do not refactor or rewrite unrelated code."
+            ;;
+        rewrite_file)
+            strategy_instructions="REWRITE the entire implementation from scratch. The current approach may have fundamental flaws. Start fresh with a clean, correct implementation."
+            ;;
+        add_guards)
+            strategy_instructions="Add GUARDS and safety checks (nil checks, bounds checks, error handling). The code likely fails because it assumes valid inputs or states that aren't guaranteed."
+            ;;
+        refactor_types)
+            strategy_instructions="REFACTOR the type signatures and casts. The code likely has type mismatches — ensure all variables, parameters, and return types are correctly declared and converted."
+            ;;
+        alternative_impl)
+            strategy_instructions="Try a COMPLETELY DIFFERENT implementation approach. If you were using approach A, try approach B. Use different algorithms, data structures, or design patterns."
+            ;;
+    esac
+
+    local prompt="You are a Swift/SwiftUI developer. A previous attempt to complete a task failed.
+
+TESTING & DEBUGGING REFERENCE:
+For building, testing, and debugging iOS/macOS apps, reference this workflow guide:
+/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
+
+This guide covers:
+- XcodeBuild MCP server tools for programmatic Xcode interaction
+- Building for simulator, booting simulators, installing/launching apps
+- UI automation: screenshots, accessibility hierarchy, tap simulation
+- Debugging UI issues (button taps, gestures, navigation)
+
+=== ORIGINAL TASK ===
+$original_task
+=== END ORIGINAL TASK ===
+"
+
+    if [ -n "$context" ]; then
+        prompt+="
+=== REFERENCE CONTEXT ===
+$context
+=== END CONTEXT ===
+"
+    fi
+
+    if [ -n "$LETTA_MEMORY_CONTEXT" ]; then
+        prompt+="
+$LETTA_MEMORY_CONTEXT
+"
+    fi
+
+    prompt+="
+=== BUILD ATTEMPT $((attempt_num - 1)) FAILED ===
+The previous implementation failed with the following errors:
+
+$error_feedback
+
+=== REPAIR STRATEGY FOR ATTEMPT $attempt_num ===
+Selected strategy: $strategy
+$strategy_instructions
+
+1. Analyze what went wrong in the previous approach
+2. Apply the selected repair strategy above
+3. Do NOT repeat the same mistakes
+4. Write the corrected code directly - do not explain, just implement
+
+Please fix the issues and provide the corrected implementation."
+
+    echo "$prompt"
+}
+
+# Parse a todo file into a JSON array string
+# Usage: parse_todo_file <file_path>
+# Returns: JSON array string like '[{"id":1,"task":"...","status":"pending"},...]'
+parse_todo_file() {
+    local file_path="$1"
+    if [ ! -f "$file_path" ]; then
+        echo "[]"
+        return 0
+    fi
+
+    local todos="["
+    local id=0
+    local first=true
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip empty lines and comments
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Strip leading markdown checkbox if present
+        local task
+        task=$(echo "$line" | sed -E 's/^[[:space:]]*(- |[[:space:]]*)?(\[x\]|\[ \])[[:space:]]*//')
+        [ -z "$task" ] && continue
+
+        # Detect status from checkbox
+        local status="pending"
+        if echo "$line" | grep -qE '^[[:space:]]*(- |[[:space:]]*)?\[x\]'; then
+            status="completed"
+        fi
+
+        id=$((id + 1))
+        if [ "$first" = "true" ]; then
+            first=false
+        else
+            todos+=","
+        fi
+        # Escape for JSON
+        local escaped_task
+        escaped_task=$(echo "$task" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        todos+="{\"id\":$id,\"task\":\"$escaped_task\",\"status\":\"$status\"}"
+    done < "$file_path"
+    todos+="]"
+
+    echo "$todos"
+}
+
+# Inject todos into a prompt string
+# Usage: inject_todos_into_prompt <prompt> <todos_json>
+inject_todos_into_prompt() {
+    local prompt="$1"
+    local todos_json="$2"
+
+    if [ "$todos_json" = "[]" ]; then
+        echo "$prompt"
+        return 0
+    fi
+
+    local todo_list
+    if command -v jq >/dev/null 2>&1; then
+        todo_list=$(echo "$todos_json" | jq -r '.[] | "\(.id). [\(.status)] \(.task)"' 2>/dev/null)
+    else
+        todo_list=$(echo "$todos_json" | grep -o '"task":"[^"]*"' | sed 's/"task":"//;s/"$//' | nl -w1 -s'. ')
+    fi
+
+    echo "$prompt
+
+TASK TRACKING — Please update the status of these items as you work:
+$todo_list
+
+Mark completed items with [x] and pending items with [ ]."
+}
+
+# Value of Information for Context Gathering
+# Returns 0 if context gathering is worth the cost, 1 otherwise
+should_gather_context() {
+    local is_followup="${1:-false}"
+    local voic_file="${ARTIFACTS_DIR:-./Artifacts}/.voi_context.json"
+
+    if [ ! -f "$voic_file" ] || ! command -v jq >/dev/null 2>&1; then
+        return 0  # No data yet, gather context
+    fi
+
+    local with_ctx_attempts
+    with_ctx_attempts=$(jq '.with_context.attempts // 0' "$voic_file" 2>/dev/null || echo "0")
+    local without_ctx_attempts
+    without_ctx_attempts=$(jq '.without_context.attempts // 0' "$voic_file" 2>/dev/null || echo "0")
+
+    if [ "$with_ctx_attempts" -lt 3 ] || [ "$without_ctx_attempts" -lt 3 ]; then
+        return 0  # Not enough data yet
+    fi
+
+    local with_ctx_avg
+    with_ctx_avg=$(jq '.with_context.avg_attempts // 99' "$voic_file" 2>/dev/null || echo "99")
+    local without_ctx_avg
+    without_ctx_avg=$(jq '.without_context.avg_attempts // 99' "$voic_file" 2>/dev/null || echo "99")
+
+    # Cost of gathering context: ~30 seconds + tokens
+    # Benefit: reduction in expected repair attempts
+    local gather_cost=1.0  # normalized cost (1 retry worth)
+    local expected_savings
+    expected_savings=$(awk -v with="$with_ctx_avg" -v without="$without_ctx_avg" 'BEGIN {print without - with}')
+
+    if [ "$(awk -v s="$expected_savings" -v c="$gather_cost" 'BEGIN {print (s > c) ? 1 : 0}')" -eq 1 ]; then
+        log_info "VOI: Context gathering beneficial (avg savings: ${expected_savings}x attempts)"
+        return 0
+    else
+        log_info "VOI: Context gathering not worth cost (avg savings: ${expected_savings}x attempts)"
+        return 1
+    fi
+}
+
+# Record context gathering outcome for VOI learning
+record_context_outcome() {
+    local had_context="$1"
+    local attempts="$2"
+    local voic_file="${ARTIFACTS_DIR:-./Artifacts}/.voi_context.json"
+
+    mkdir -p "$(dirname "$voic_file")"
+    if [ ! -f "$voic_file" ]; then
+        echo '{"with_context":{"attempts":0,"total_attempts":0,"avg_attempts":0},"without_context":{"attempts":0,"total_attempts":0,"avg_attempts":0}}' > "$voic_file"
+    fi
+
+    local key
+    if [ "$had_context" = "true" ]; then
+        key="with_context"
+    else
+        key="without_context"
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp)
+    jq --arg k "$key" --argjson a "$attempts" \
+       '.[$k].attempts += 1 | .[$k].total_attempts += $a | .[$k].avg_attempts = (.[$k].total_attempts / .[$k].attempts)' \
+       "$voic_file" > "$tmp_file" 2>/dev/null || cat "$voic_file" > "$tmp_file"
+    mv "$tmp_file" "$voic_file"
+}
+
 gather_context() {
     local context=""
     local has_context=false
@@ -2671,6 +3451,28 @@ gather_context() {
 
     if [ ${#CONTEXT_PATHS[@]} -gt 0 ]; then
         has_context=true
+    fi
+
+    # Try cache first
+    if [ "$has_context" = true ]; then
+        local cache_key input_content
+        input_content=$(get_input_content)
+        cache_key=$(_compute_context_cache_key "$input_content")
+        if _load_context_cache "$cache_key"; then
+            return 0
+        fi
+    fi
+
+    # Value of Information check: is context gathering worth the cost?
+    if [ "$has_context" = true ] && ! should_gather_context; then
+        log_info "Skipping context gathering (VOI analysis)"
+        return
+    fi
+
+    # Offer user chance to skip
+    if prompt_skip_context "Context gathering"; then
+        echo "" >&2
+        return
     fi
 
     if [ "$has_context" = true ]; then
@@ -2734,7 +3536,20 @@ $dir_content
         done
     fi
 
+    # Hard cap on context size before returning — prevents 5MB+ prompts
+    if [ "${#context}" -gt "$MAX_CONTEXT_CHARS" ]; then
+        log_warning "Context truncated from ${#context} to ${MAX_CONTEXT_CHARS} chars (set MAX_CONTEXT_CHARS env var to override)"
+        context="${context:0:$MAX_CONTEXT_CHARS}"
+        context+="
+... [CONTEXT TRUNCATED — set MAX_CONTEXT_CHARS env var to increase limit] ..."
+    fi
+
+    # Save to cache
     if [ "$has_context" = true ]; then
+        local cache_key input_content
+        input_content=$(get_input_content)
+        cache_key=$(_compute_context_cache_key "$input_content")
+        _save_context_cache "$cache_key" "$context"
         spinner_success "Context gathered"
     fi
 
@@ -2805,6 +3620,21 @@ Use the following documentation and context as reference:
 $context
 === END CONTEXT ===
 "
+    fi
+
+    # Inject todo items if available
+    if [ -n "${TODO_FILE:-}" ] && [ -f "$TODO_FILE" ]; then
+        local todos_str
+        todos_str=$(parse_todo_file "$TODO_FILE" | jq -r '.[] | "- \(.text) [\(.status)]"' 2>/dev/null || echo "")
+        if [ -n "$todos_str" ]; then
+            prompt+="
+
+=== TODO ITEMS ===
+Track your progress against these items. Mark each as [x] when done:
+$todos_str
+=== END TODO ===
+"
+        fi
     fi
 
     # Inject memory context if available (learned patterns from previous sessions)
@@ -2953,11 +3783,24 @@ get_latest_chat_id() {
     echo ""
 }
 
+# Write an event to the stream timeline log
+write_stream_timeline() {
+    local event="$1"
+    local details="${2:-}"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    if [ -n "$STREAM_TIMELINE_FILE" ]; then
+        printf "[%s] %-18s | %s\n" "$timestamp" "$event" "$details" >> "$STREAM_TIMELINE_FILE"
+    fi
+}
+
 # Run AI CLI with session support
 run_ai_cli() {
     local prompt="$1"
     local is_followup="${2:-false}"
     local output_file="${LOGS_DIR}/coder_attempt_${CURRENT_ATTEMPT}.log"
+
+    update_sidebar_stage "Generating Code"
 
     log_attempt "Running ${AI_PROVIDER} AI CLI (session: $SESSION_ID)..."
 
@@ -2981,22 +3824,36 @@ run_ai_cli() {
     local prompt_file="${LOGS_DIR}/prompt_attempt_${CURRENT_ATTEMPT}.txt"
     printf '%s' "$prompt" > "$prompt_file"
 
+    # Create empty MCP config for Kimi to avoid MCP_DOCKER connection errors
+    local kimi_mcp_config=""
+
     # Build command based on provider (all use temp file/stdin for safety)
     case "$provider_lower" in
         cursor)
             # cursor-agent reads from stdin when piped
+            local cursor_output_format="text"
             local cursor_stream_flag=""
             if [ "$STREAM_OUTPUT" = "true" ] && [ "$AI_CMD" = "cursor-agent" ] && [ "$CURSOR_STREAM_SUPPORTED" = "true" ]; then
-                cursor_stream_flag="--stream"
+                # cursor-agent uses --stream-partial-output (requires --output-format stream-json)
+                cursor_output_format="stream-json"
+                cursor_stream_flag="--stream-partial-output"
             fi
 
             if [ "$is_followup" = "true" ] && [ -n "$CURSOR_CHAT_ID" ] && [ "$AI_CMD" = "cursor-agent" ]; then
                 # Resume existing session
                 log_verbose "Resuming Cursor chat session: $CURSOR_CHAT_ID"
-                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text $cursor_stream_flag"
+                if [ "$cursor_output_format" = "stream-json" ] && command -v jq &>/dev/null; then
+                    ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format stream-json $cursor_stream_flag 2>&1 | grep '^\\s*{' | jq -r 'select(.role==\"assistant\") | .content[]? | select(.type==\"text\") | .text'"
+                else
+                    ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --resume \"$CURSOR_CHAT_ID\" --force --print --output-format text $cursor_stream_flag"
+                fi
             else
                 # New session (first attempt)
-                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --force --print --output-format text $cursor_stream_flag"
+                if [ "$cursor_output_format" = "stream-json" ] && command -v jq &>/dev/null; then
+                    ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --force --print --output-format stream-json $cursor_stream_flag 2>&1 | grep '^\\s*{' | jq -r 'select(.role==\"assistant\") | .content[]? | select(.type==\"text\") | .text'"
+                else
+                    ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --force --print --output-format text $cursor_stream_flag"
+                fi
                 log_verbose "Starting new Cursor chat session"
             fi
             ;;
@@ -3076,6 +3933,26 @@ run_ai_cli() {
             log_verbose "Running GitHub Copilot CLI (piped from stdin)"
             ;;
 
+        kimi|kimi-code|moonshot)
+            # Kimi Code CLI - use stream-json to avoid Rich markup parsing issues
+            # with bracket characters in prompts (e.g., [/doc/path#id]).
+            # Create a temporary empty MCP config to suppress MCP_DOCKER errors.
+            kimi_mcp_config=$(mktemp /tmp/kimi_mcp_empty.XXXXXX)
+            echo '{"mcpServers":{}}' > "$kimi_mcp_config"
+
+            local kimi_flags="--yolo --print --output-format stream-json --mcp-config-file \"$kimi_mcp_config\""
+            if [ -n "${AI_MODEL:-}" ]; then
+                kimi_flags="$kimi_flags --model \"$AI_MODEL\""
+            fi
+            # Filter JSON stream to extract text responses; fall back to raw JSON if jq unavailable
+            if command -v jq &>/dev/null; then
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD $kimi_flags 2>&1 | grep '^\\s*{' | jq -r 'select(.role==\"assistant\") | .content[]? | select(.type==\"text\") | .text'"
+            else
+                ai_cmd_full="cat \"$prompt_file\" | $AI_CMD $kimi_flags"
+            fi
+            log_verbose "Running Kimi Code CLI (stream-json mode)"
+            ;;
+
         *)
             log_error "Unknown AI provider: $AI_PROVIDER"
             return 1
@@ -3102,29 +3979,174 @@ run_ai_cli() {
         echo -e "${CYAN}─── ${AI_PROVIDER} CLI Output ───${NC}" >&2
         echo "" >&2
 
-        # Stream with unbuffering - run in WORK_DIR (where user invoked the command)
-        if (cd "$WORK_DIR" && run_unbuffered "eval $ai_cmd_full" 2>&1) | unbuffered_tee "$output_file"; then
-            ai_exit_code=0
-            echo "" >&2
-            echo -e "${GREEN}[DONE]${NC} Code generation completed ✓" >&2
+        # Initialize stream timeline log
+        STREAM_TIMELINE_FILE="${LOGS_DIR}/stream_timeline_attempt_${CURRENT_ATTEMPT}.log"
+        write_stream_timeline "START" "provider=$AI_PROVIDER attempt=$CURRENT_ATTEMPT"
+
+        local stream_start_time
+        stream_start_time=$(date +%s)
+        local heartbeat_pid=""
+        local tail_pid=""
+
+        # Run the AI command in a single background subshell writing directly to file.
+        # Use run_unbuffered for line-buffered output so tail -f sees it immediately.
+        (
+            cd "$WORK_DIR" && run_unbuffered "eval $ai_cmd_full" > "$output_file" 2>&1
+        ) &
+        stream_cmd_pid=$!
+
+        # Stream file contents in real-time via tail -f
+        tail -n +1 -f "$output_file" 2>/dev/null &
+        tail_pid=$!
+
+        # Start background heartbeat + stalled watchdog if enabled
+        if [ "$STREAM_HEARTBEAT_ENABLED" = "true" ]; then
+            (
+                local last_bytes=0
+                local last_changed_time=$stream_start_time
+                while kill -0 "$stream_cmd_pid" 2>/dev/null; do
+                    sleep "$STREAM_HEARTBEAT_INTERVAL"
+                    local elapsed=$(($(date +%s) - stream_start_time))
+                    local bytes=0
+                    [ -f "$output_file" ] && bytes=$(wc -c < "$output_file" 2>/dev/null || echo 0)
+
+                    # Track when bytes last CHANGED (not just when they were non-zero)
+                    if [ "$bytes" -gt "$last_bytes" ]; then
+                        last_changed_time=$(date +%s)
+                        last_bytes=$bytes
+                    fi
+                    local stalled=$(( $(date +%s) - last_changed_time ))
+
+                    # Stalled watchdog: if no NEW output for too long, kill the provider
+                    # This catches both "0 bytes forever" and "stopped producing after some bytes"
+                    if [ "$stalled" -ge "$STREAM_ZERO_BYTES_TIMEOUT" ]; then
+                        echo -e "${RED}[STREAM STATUS]${NC} ${elapsed}s elapsed | ${bytes} bytes | ${AI_PROVIDER} STALLED — no new output for ${stalled}s" >&2
+                        write_stream_timeline "TIMEOUT" "elapsed=${elapsed}s bytes=${bytes} stalled=${stalled}s reason=stalled"
+                        kill -TERM "$stream_cmd_pid" 2>/dev/null
+                        for child in $(pgrep -P "$stream_cmd_pid" 2>/dev/null || true); do
+                            kill -TERM "$child" 2>/dev/null || true
+                        done
+                        break
+                    fi
+
+                    # Total timeout watchdog
+                    if [ "$elapsed" -ge "$STREAM_MAX_TOTAL_TIME" ]; then
+                        echo -e "${RED}[STREAM STATUS]${NC} ${elapsed}s elapsed | ${bytes} bytes | ${AI_PROVIDER} TIMEOUT — max total time reached" >&2
+                        write_stream_timeline "TIMEOUT" "elapsed=${elapsed}s bytes=${bytes} reason=max_total_time"
+                        kill -TERM "$stream_cmd_pid" 2>/dev/null
+                        for child in $(pgrep -P "$stream_cmd_pid" 2>/dev/null || true); do
+                            kill -TERM "$child" 2>/dev/null || true
+                        done
+                        break
+                    fi
+
+                    local msg="${elapsed}s elapsed | ${bytes} bytes | ${AI_PROVIDER} still working..."
+                    echo -e "${CYAN}[STREAM STATUS]${NC} $msg" >&2
+                    write_stream_timeline "HEARTBEAT" "elapsed=${elapsed}s bytes=${bytes}"
+                done
+            ) &
+            heartbeat_pid=$!
+        fi
+
+        # Wait for the stream command to finish
+        local stream_exit=0
+        if wait "$stream_cmd_pid"; then
+            stream_exit=0
         else
-            ai_exit_code=$?
+            stream_exit=$?
+        fi
+
+        # Stop tail
+        if [ -n "$tail_pid" ]; then
+            kill "$tail_pid" 2>/dev/null || true
+            wait "$tail_pid" 2>/dev/null || true
+        fi
+
+        # Stop heartbeat
+        if [ -n "$heartbeat_pid" ]; then
+            kill "$heartbeat_pid" 2>/dev/null || true
+            wait "$heartbeat_pid" 2>/dev/null || true
+        fi
+
+        local total_elapsed=$(($(date +%s) - stream_start_time))
+        local output_bytes=0
+        [ -f "$output_file" ] && output_bytes=$(wc -c < "$output_file" 2>/dev/null || echo 0)
+
+        # Detect timeout: killed by watchdog (SIGTERM/exit 143) OR zero bytes for too long
+        # SIGTERM (143 = 128+15) means our watchdog killed it — always treat as timeout
+        local was_killed_by_watchdog=false
+        local timeout_type="timeout"  # "timeout" = zero bytes, "stall" = partial output then stopped
+        if [ "$stream_exit" -eq 143 ]; then
+            was_killed_by_watchdog=true
+            if [ "$output_bytes" -gt 0 ]; then
+                timeout_type="stall"
+            fi
+        elif [ $stream_exit -ne 0 ] && [ "$output_bytes" -eq 0 ] && [ "$total_elapsed" -ge "$STREAM_ZERO_BYTES_TIMEOUT" ]; then
+            was_killed_by_watchdog=true
+            timeout_type="timeout"
+        elif [ $stream_exit -ne 0 ] && [ "$output_bytes" -gt 0 ] && [ "$total_elapsed" -ge "$STREAM_MAX_TOTAL_TIME" ]; then
+            was_killed_by_watchdog=true
+            timeout_type="stall"
+        fi
+
+        if [ "$was_killed_by_watchdog" = "true" ]; then
+            AI_LAST_TIMEOUT="true"
+            AI_LAST_TIMEOUT_TYPE="$timeout_type"
+            ai_exit_code=124  # Standard timeout exit code
+            write_stream_timeline "TIMEOUT" "elapsed=${total_elapsed}s exit=124 bytes=${output_bytes} type=${timeout_type}"
             echo "" >&2
-            echo -e "${RED}[FAILED]${NC} Code generation failed (exit $ai_exit_code) ✗" >&2
+            if [ "$timeout_type" = "stall" ]; then
+                echo -e "${RED}[STALL]${NC} ${AI_PROVIDER} stalled after ${total_elapsed}s (${output_bytes} bytes partial output) — switching providers" >&2
+            else
+                echo -e "${RED}[TIMEOUT]${NC} ${AI_PROVIDER} timed out after ${total_elapsed}s (${output_bytes} bytes produced) — switching providers" >&2
+            fi
+        elif [ $stream_exit -eq 0 ]; then
+            AI_LAST_TIMEOUT="false"
+            ai_exit_code=0
+            write_stream_timeline "COMPLETE" "elapsed=${total_elapsed}s exit=0"
+            echo "" >&2
+            echo -e "${GREEN}[DONE]${NC} Code generation completed ✓ (${total_elapsed}s)" >&2
+        else
+            AI_LAST_TIMEOUT="false"
+            ai_exit_code=$stream_exit
+            write_stream_timeline "FAILED" "elapsed=${total_elapsed}s exit=$stream_exit"
+            echo "" >&2
+            echo -e "${RED}[FAILED]${NC} Code generation failed (exit $stream_exit) after ${total_elapsed}s ✗" >&2
         fi
 
         echo -e "${CYAN}─── End Output ───${NC}" >&2
         echo "" >&2
     else
-        # Non-streaming: use spinner animation
+        # Non-streaming: use spinner animation with timeout
         start_spinner "$spinner_msg"
 
-        # Run in WORK_DIR (where user invoked the command) not PROJECT_ROOT
-        if (cd "$WORK_DIR" && eval "$ai_cmd_full" > "$output_file" 2>&1); then
+        # Run in background subshell so we can enforce a timeout
+        (
+            cd "$WORK_DIR" && eval "$ai_cmd_full" > "$output_file" 2>&1
+        ) &
+        local bg_pid=$!
+
+        # Timeout watchdog
+        (
+            sleep "$STREAM_MAX_TOTAL_TIME"
+            if kill -0 "$bg_pid" 2>/dev/null; then
+                kill -TERM "$bg_pid" 2>/dev/null
+                for child in $(pgrep -P "$bg_pid" 2>/dev/null || true); do
+                    kill -TERM "$child" 2>/dev/null || true
+                done
+            fi
+        ) &
+
+        if wait "$bg_pid"; then
             ai_exit_code=0
             spinner_success "$spinner_msg"
         else
             ai_exit_code=$?
+            if [ "$ai_exit_code" -eq 143 ] || [ "$ai_exit_code" -eq 124 ]; then
+                AI_LAST_TIMEOUT="true"
+                AI_LAST_TIMEOUT_TYPE="timeout"
+                log_warning "${AI_PROVIDER} timed out after ${STREAM_MAX_TOTAL_TIME}s (non-streaming mode)"
+            fi
             spinner_error "$spinner_msg"
         fi
     fi
@@ -3137,6 +4159,10 @@ run_ai_cli() {
         if check_auth_error "$ai_output"; then
             # Auth error detected, update session context
             update_session_context "$CURRENT_ATTEMPT" "auth_failed" "Authentication error with $AI_PROVIDER"
+            # Clean up Kimi temp MCP config if created
+            if [ -n "${kimi_mcp_config:-}" ] && [ -f "$kimi_mcp_config" ]; then
+                rm -f "$kimi_mcp_config"
+            fi
             log_error "Please authenticate with $AI_PROVIDER and try again"
             return 1
         fi
@@ -3171,6 +4197,11 @@ run_ai_cli() {
         update_session_context "$CURRENT_ATTEMPT" "failed" "${AI_PROVIDER} CLI exit code: $ai_exit_code"
     fi
 
+    # Clean up Kimi temp MCP config if created (do this before early returns)
+    if [ -n "${kimi_mcp_config:-}" ] && [ -f "$kimi_mcp_config" ]; then
+        rm -f "$kimi_mcp_config"
+    fi
+
     if [ $ai_exit_code -ne 0 ]; then
         log_error "${AI_PROVIDER} CLI failed with exit code: $ai_exit_code"
         return 1
@@ -3183,15 +4214,13 @@ run_ai_cli() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Multi-Platform Build Orchestration
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Run builds for multiple platforms using parallel execution
-# Uses xargs for parallel builds when MCP_CALLER=true to avoid circular delegation
+# Run builds for multiple platforms using parallel execution.
+# All builds run concurrently via xargs -P with a live progress monitor.
 run_multi_platform_build() {
     local platforms=("${DETECTED_PLATFORMS[@]}")
     local num_platforms=${#platforms[@]}
 
     if [ $num_platforms -le 1 ]; then
-        # Single platform - run normal build
         return 1  # Signal caller to use normal build path
     fi
 
@@ -3201,9 +4230,11 @@ run_multi_platform_build() {
     if [ "$parallelism" -eq 0 ]; then
         parallelism=$num_platforms
     fi
+    log_info "Parallelism: $parallelism concurrent platform build(s)"
 
     local results_dir="${LOGS_DIR}/platform_results"
     mkdir -p "$results_dir"
+    rm -f "${results_dir}"/*.json "${results_dir}"/*.log
 
     local platform_args=()
     for plat in "${platforms[@]}"; do
@@ -3221,17 +4252,12 @@ run_multi_platform_build() {
     [ "$VERBOSE" = "true" ] && common_args+=" --verbose"
     common_args+=" --json-output"
 
-    local all_passed=true
-    local failed_platforms=()
-    local passed_platforms=()
+    # Resolve platform.sh path before embedding in heredoc
+    local platform_sh_path="${PHASE5_LIB_DIR:-${SCRIPT_DIR}/lib}/platform.sh"
 
-    if [ "$MCP_CALLER" = "true" ]; then
-        # Called by MCP server - use xargs for parallel builds to avoid circular delegation
-        log_info "Running parallel builds via xargs (MCP_CALLER mode)"
-
-        # Create temp script for xargs to execute
-        local build_script="${results_dir}/run_platform_build.sh"
-        cat > "$build_script" << SCRIPT_EOF
+    # Create temp script for xargs to execute
+    local build_script="${results_dir}/run_platform_build.sh"
+    cat > "$build_script" << SCRIPT_EOF
 #!/bin/bash
 platform="\$1"
 plat_safe="\$(echo "\$platform" | tr ' ' '_')"
@@ -3241,31 +4267,36 @@ plat_logs_dir="$results_dir/\${plat_safe}"
 mkdir -p "\$plat_logs_dir"
 
 # Construct destination from platform name
-case "\$platform" in
-    "iOS Simulator")
-        dest="platform=iOS Simulator,name=iPhone 16"
-        ;;
-    "macOS")
-        dest="platform=macOS"
-        ;;
-    "watchOS Simulator")
-        dest="platform=watchOS Simulator,name=Apple Watch Series 9 (45mm)"
-        ;;
-    "tvOS Simulator")
-        dest="platform=tvOS Simulator,name=Apple TV"
-        ;;
-    "visionOS Simulator")
-        dest="platform=visionOS Simulator,name=Apple Vision Pro"
-        ;;
-    *)
-        dest="platform=\$platform"
-        ;;
-esac
+PLATFORM_SH="$platform_sh_path"
+[ -f "\$PLATFORM_SH" ] && source "\$PLATFORM_SH"
+if type construct_destination &>/dev/null; then
+    dest=$(construct_destination "\$platform" "")
+else
+    case "\$platform" in
+        "iOS Simulator")
+            dest="platform=iOS Simulator,name=iPhone 16"
+            ;;
+        "macOS")
+            dest="platform=macOS"
+            ;;
+        "watchOS Simulator")
+            dest="platform=watchOS Simulator,name=Apple Watch Series 9 (45mm)"
+            ;;
+        "tvOS Simulator")
+            dest="platform=tvOS Simulator,name=Apple TV"
+            ;;
+        "visionOS Simulator")
+            dest="platform=visionOS Simulator,name=Apple Vision Pro"
+            ;;
+        *)
+            dest="platform=\$platform"
+            ;;
+    esac
+fi
 
 "$BUILD_LINT_SCRIPT" $common_args --destination "\$dest" --logs-dir "\$plat_logs_dir" > "\$log_file" 2>&1
 exit_code=\$?
 
-# Write result JSON
 if [ \$exit_code -eq 0 ]; then
     echo '{"platform":"'\$platform'","status":"success","exit_code":0}' > "\$result_file"
 else
@@ -3274,108 +4305,80 @@ fi
 
 exit \$exit_code
 SCRIPT_EOF
-        chmod +x "$build_script"
+    chmod +x "$build_script"
 
-        # Run parallel builds with xargs
-        local xargs_exit_code=0
-        if [ "$MULTI_PLATFORM_FAIL_FAST" = "true" ]; then
-            # Fail fast - stop on first error
-            printf '%s\n' "${platform_args[@]}" | xargs -P "$parallelism" -I {} "$build_script" "{}" || xargs_exit_code=$?
-        else
-            # Continue on error - build all platforms
-            printf '%s\n' "${platform_args[@]}" | xargs -P "$parallelism" -I {} sh -c '"$1" "$2" || true' _ "$build_script" "{}"
-        fi
-
-        # Collect results
-        for plat in "${platforms[@]}"; do
-            local result_file="${results_dir}/$(echo "$plat" | tr ' ' '_').json"
-            if [ -f "$result_file" ]; then
-                local status
-                status=$(grep -o '"status":"[^"]*"' "$result_file" | cut -d'"' -f4)
-                if [ "$status" = "success" ]; then
-                    passed_platforms+=("$plat")
-                else
-                    failed_platforms+=("$plat")
-                    all_passed=false
-                fi
-            else
-                failed_platforms+=("$plat")
-                all_passed=false
-            fi
-        done
-
+    # Launch parallel builds via xargs
+    local xargs_pid=""
+    if [ "$MULTI_PLATFORM_FAIL_FAST" = "true" ]; then
+        printf '%s\n' "${platform_args[@]}" | xargs -P "$parallelism" -I {} "$build_script" "{}" &
+        xargs_pid=$!
     else
-        # Standalone mode - run sequential builds (or delegate to MCP if available)
-        log_info "Running sequential platform builds"
-
-        for plat in "${platforms[@]}"; do
-            log_info "Building for platform: $plat"
-
-            # Show progress
-            if type show_progress &>/dev/null && [ "${BUILDAGENT_FANCY_UI:-false}" = "true" ]; then
-                local idx=0
-                for i in "${!platforms[@]}"; do
-                    [ "${platforms[$i]}" = "$plat" ] && idx=$i && break
-                done
-                show_progress $((idx + 1)) $num_platforms "Platform builds"
-            fi
-
-            local plat_log="${results_dir}/$(echo "$plat" | tr ' ' '_').log"
-            local plat_result="${results_dir}/$(echo "$plat" | tr ' ' '_').json"
-            local plat_logs_dir="${results_dir}/$(echo "$plat" | tr ' ' '_')"
-            mkdir -p "$plat_logs_dir"
-
-            # Construct destination
-            local dest=""
-            case "$plat" in
-                "iOS Simulator")
-                    dest="platform=iOS Simulator,name=iPhone 16"
-                    ;;
-                "macOS")
-                    dest="platform=macOS"
-                    ;;
-                "watchOS Simulator")
-                    dest="platform=watchOS Simulator,name=Apple Watch Series 9 (45mm)"
-                    ;;
-                "tvOS Simulator")
-                    dest="platform=tvOS Simulator,name=Apple TV"
-                    ;;
-                "visionOS Simulator")
-                    dest="platform=visionOS Simulator,name=Apple Vision Pro"
-                    ;;
-                *)
-                    dest="platform=$plat"
-                    ;;
-            esac
-
-            local lint_args=("--logs-dir" "$plat_logs_dir" "--destination" "$dest" "--json-output")
-            [ -n "${XCODE_WORKSPACE:-}" ] && lint_args+=("--workspace" "$XCODE_WORKSPACE")
-            [ -n "${XCODE_PROJECT:-}" ] && [ -z "${XCODE_WORKSPACE:-}" ] && lint_args+=("--project" "$XCODE_PROJECT")
-            [ -n "$SCHEME" ] && lint_args+=("--scheme" "$SCHEME")
-            [ -n "$BUILD_CONFIGURATION" ] && lint_args+=("--configuration" "$BUILD_CONFIGURATION")
-            [ -n "$DERIVED_DATA_PATH" ] && lint_args+=("--derived-data" "$DERIVED_DATA_PATH")
-            [ "$SKIP_LINT" = "true" ] && lint_args+=("--skip-lint")
-            [ "$VERBOSE" = "true" ] && lint_args+=("--verbose")
-
-            if "$BUILD_LINT_SCRIPT" "${lint_args[@]}" > "$plat_log" 2>&1; then
-                passed_platforms+=("$plat")
-                echo '{"platform":"'"$plat"'","status":"success","exit_code":0}' > "$plat_result"
-                log_success "Platform $plat: BUILD PASSED"
-            else
-                local exit_code=$?
-                failed_platforms+=("$plat")
-                all_passed=false
-                echo '{"platform":"'"$plat"'","status":"failed","exit_code":'"$exit_code"'}' > "$plat_result"
-                log_error "Platform $plat: BUILD FAILED (exit code: $exit_code)"
-
-                if [ "$MULTI_PLATFORM_FAIL_FAST" = "true" ]; then
-                    log_warning "Fail-fast enabled, stopping after first failure"
-                    break
-                fi
-            fi
-        done
+        printf '%s\n' "${platform_args[@]}" | xargs -P "$parallelism" -I {} sh -c '"$1" "$2" || true' _ "$build_script" "{}" &
+        xargs_pid=$!
     fi
 
+    # Live progress monitor with keyboard abort
+    local spin_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    local spin_len=${#spin_chars}
+    local spin_idx=0
+    local user_aborted=false
+
+    while kill -0 "$xargs_pid" 2>/dev/null; do
+        local completed=0
+        for plat in "${platforms[@]}"; do
+            local result_file="${results_dir}/$(echo "$plat" | tr ' ' '_').json"
+            [ -f "$result_file" ] && completed=$((completed + 1))
+        done
+        local running=$((num_platforms - completed))
+        local spin_char="${spin_chars:spin_idx:1}"
+        spin_idx=$(((spin_idx + 1) % spin_len))
+        printf "\r\033[K\033[36m[%s]\033[0m Building %d platform(s): %d/%d complete (%d running)  (press 'q' to abort)" "$spin_char" "$num_platforms" "$completed" "$num_platforms" "$running" >&2
+
+        # Check for keyboard abort
+        local key=""
+        if IFS= read -rs -t 1 -n 1 key < /dev/tty 2>/dev/null; then
+            if [ "$key" = "q" ] || [ "$key" = "Q" ]; then
+                user_aborted=true
+                printf "\r\033[K\n" >&2
+                log_warning "User aborted multi-platform build"
+                break
+            fi
+        fi
+    done
+
+    if [ "$user_aborted" = "true" ]; then
+        kill -TERM "$xargs_pid" 2>/dev/null || true
+        sleep 0.5
+        kill -KILL "$xargs_pid" 2>/dev/null || true
+        wait "$xargs_pid" 2>/dev/null || true
+        return 10
+    fi
+
+    # Wait for xargs to finish
+    wait "$xargs_pid" 2>/dev/null || true
+    printf "\r\033[K" >&2
+
+    # Collect results
+    local all_passed=true
+    local failed_platforms=()
+    local passed_platforms=()
+
+    for plat in "${platforms[@]}"; do
+        local result_file="${results_dir}/$(echo "$plat" | tr ' ' '_').json"
+        if [ -f "$result_file" ]; then
+            local status
+            status=$(grep -o '"status":"[^"]*"' "$result_file" | cut -d'"' -f4)
+            if [ "$status" = "success" ]; then
+                passed_platforms+=("$plat")
+            else
+                failed_platforms+=("$plat")
+                all_passed=false
+            fi
+        else
+            failed_platforms+=("$plat")
+            all_passed=false
+        fi
+    done
     # Summary
     echo "" >&2
     log_section "Multi-Platform Build Summary"
@@ -3415,10 +4418,77 @@ SCRIPT_EOF
 # Build Verification Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Background monitor for BuildLint progress.
+# Watches the log file and prints stage transitions + heartbeats to stderr
+# so the user knows what is happening during long builds.
+monitor_buildlint_progress() {
+    local log_file="$1"
+    local start_time
+    start_time=$(date +%s)
+    local last_heartbeat_time=$start_time
+    local last_stage=""
+    local poll_interval=3
+
+    while true; do
+        sleep "$poll_interval"
+
+        local elapsed
+        elapsed=$(($(date +%s) - start_time))
+        local current_stage=""
+
+        if [ -f "$log_file" ]; then
+            # Detect current stage from the last 30 lines of the log
+            local tail_lines
+            tail_lines=$(tail -n 30 "$log_file" 2>/dev/null || true)
+
+            if echo "$tail_lines" | grep -q "BUILD SUCCEEDED"; then
+                current_stage="Build succeeded"
+            elif echo "$tail_lines" | grep -q "BUILD FAILED"; then
+                current_stage="Build failed"
+            elif echo "$tail_lines" | grep -q "Starting Xcode build"; then
+                current_stage="Compiling with xcodebuild"
+            elif echo "$tail_lines" | grep -q "Running SwiftLint"; then
+                current_stage="Running SwiftLint"
+            elif echo "$tail_lines" | grep -q "Cleaning Xcode build folder"; then
+                current_stage="Cleaning build folder"
+            elif echo "$tail_lines" | grep -q "Cleaning DerivedData"; then
+                current_stage="Cleaning DerivedData"
+            elif echo "$tail_lines" | grep -q "Cleaning Swift package"; then
+                current_stage="Cleaning Swift package"
+            elif echo "$tail_lines" | grep -q "Building Swift Package"; then
+                current_stage="Building Swift package"
+            fi
+        fi
+
+        # Print stage transition
+        if [ -n "$current_stage" ] && [ "$current_stage" != "$last_stage" ]; then
+            echo -e "${CYAN}[BUILD STAGE]${NC} ${current_stage} (${elapsed}s)" >&2
+            last_stage="$current_stage"
+            last_heartbeat_time=$(date +%s)
+        fi
+
+        # Heartbeat every 30 seconds if no stage change
+        local since_heartbeat
+        since_heartbeat=$(($(date +%s) - last_heartbeat_time))
+        if [ "$since_heartbeat" -ge 30 ]; then
+            if [ -n "$last_stage" ]; then
+                echo -e "${CYAN}[BUILD STATUS]${NC} ${last_stage} — ${elapsed}s elapsed" >&2
+            else
+                echo -e "${CYAN}[BUILD STATUS]${NC} Build in progress — ${elapsed}s elapsed" >&2
+            fi
+            last_heartbeat_time=$(date +%s)
+        fi
+    done
+}
+
 # Run BuildLint.sh and capture results
 run_build_lint() {
     local lint_log="${LOGS_DIR}/buildlint_attempt_${CURRENT_ATTEMPT}.log"
     local lint_exit_code=0
+    local buildlint_start_time
+    buildlint_start_time=$(date +%s)
+
+    update_sidebar_stage "Building"
 
     log_attempt "Running BuildLint.sh..."
 
@@ -3524,19 +4594,31 @@ run_build_lint() {
         echo -e "${CYAN}─── BuildLint Output ───${NC}" >&2
         echo "" >&2
 
-        # Stream output with unbuffering
-        if run_unbuffered "\"$BUILD_LINT_SCRIPT\" ${lint_args[*]}" 2>&1 | unbuffered_tee "$lint_log"; then
+        # Start background progress monitor
+        monitor_buildlint_progress "$lint_log" &
+        local monitor_pid=$!
+
+        # Stream output with unbuffering (quote each arg — destination strings contain commas)
+        local buildlint_cmd
+        buildlint_cmd=$(printf '%q ' "$BUILD_LINT_SCRIPT" "${lint_args[@]}")
+        if run_unbuffered "$buildlint_cmd" 2>&1 | unbuffered_tee "$lint_log"; then
             lint_exit_code=0
         else
             lint_exit_code=$?
         fi
 
+        # Kill progress monitor
+        kill "$monitor_pid" 2>/dev/null
+        wait "$monitor_pid" 2>/dev/null
+
         echo "" >&2
         echo -e "${CYAN}─── End BuildLint ───${NC}" >&2
         echo "" >&2
     else
-        # Non-streaming: use spinner
+        # Non-streaming: use spinner + background progress monitor
         start_spinner "$build_spinner_msg"
+        monitor_buildlint_progress "$lint_log" &
+        local monitor_pid=$!
 
         if "$BUILD_LINT_SCRIPT" "${lint_args[@]}" > "$lint_log" 2>&1; then
             lint_exit_code=0
@@ -3544,7 +4626,9 @@ run_build_lint() {
             lint_exit_code=$?
         fi
 
-        # Don't show success/error here yet - we need to check for error.log first
+        # Kill progress monitor and spinner
+        kill "$monitor_pid" 2>/dev/null
+        wait "$monitor_pid" 2>/dev/null
         stop_spinner
     fi
 
@@ -3555,9 +4639,10 @@ run_build_lint() {
         lint_exit_code=10
     fi
 
+    local buildlint_elapsed=$(($(date +%s) - buildlint_start_time))
     if [ $lint_exit_code -eq 0 ]; then
-        echo -e "${GREEN}[DONE]${NC} $build_spinner_msg ${GREEN}✓${NC}" >&2
-        log_success "Build verification passed"
+        echo -e "${GREEN}[DONE]${NC} $build_spinner_msg ${GREEN}✓${NC} (${buildlint_elapsed}s)" >&2
+        log_success "Build verification passed (${buildlint_elapsed}s)"
         # Read BUILT_PRODUCTS_DIR written by BuildLint.sh after successful build
         local built_products_dir_file="${LOGS_DIR}/built_products_dir.txt"
         if [ -f "$built_products_dir_file" ]; then
@@ -3566,8 +4651,8 @@ run_build_lint() {
         fi
         return 0
     else
-        echo -e "${RED}[FAILED]${NC} $build_spinner_msg ${RED}✗${NC}" >&2
-        log_error "Build verification failed (exit code: $lint_exit_code)"
+        echo -e "${RED}[FAILED]${NC} $build_spinner_msg ${RED}✗${NC} (${buildlint_elapsed}s)" >&2
+        log_error "Build verification failed (exit code: $lint_exit_code) after ${buildlint_elapsed}s"
         return $lint_exit_code
     fi
 }
@@ -3586,6 +4671,49 @@ get_error_feedback() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Status File Functions
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Parse a markdown todo file into JSON array
+# Supports:
+#   - [ ] Unchecked item
+#   - [x] Checked item
+#   - [ ] Item with @file tag (track per-file)
+#   - <!-- done --> marker
+parse_todo_file() {
+    local todo_file="$1"
+    if [ -z "$todo_file" ] || [ ! -f "$todo_file" ]; then
+        echo "[]"
+        return 0
+    fi
+
+    local items=""
+    local idx=0
+    while IFS= read -r line; do
+        # Match: - [ ] or - [x] at start of line
+        if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+\[([xX[:space:]])\][[:space:]]+(.+)$ ]]; then
+            local check="${BASH_REMATCH[1]}"
+            local text="${BASH_REMATCH[2]}"
+            local status="pending"
+            local file_tag=""
+
+            if [[ "$check" == [xX] ]]; then
+                status="done"
+            fi
+
+            # Extract @file tag
+            if [[ "$text" =~ @([A-Za-z0-9_./-]+) ]]; then
+                file_tag="${BASH_REMATCH[1]}"
+            fi
+
+            if [ -n "$items" ]; then
+                items+=","
+            fi
+            items+="{\"id\":$idx,\"text\":\"$text\",\"status\":\"$status\",\"file\":\"$file_tag\"}"
+            idx=$((idx + 1))
+        fi
+    done < "$todo_file"
+
+    echo "[$items]"
+}
 
 write_success_status() {
     local status_file="${STATUS_DIR}/success.txt"
@@ -3769,6 +4897,8 @@ run_repair_loop_with_errors() {
     log_info "Initial errors length: ${#initial_errors} chars"
     [ -n "$LETTA_MEMORY_CONTEXT" ] && log_info "Memory context: available"
 
+    update_sidebar_stage "Repairing"
+
     while [ $CURRENT_ATTEMPT -lt $MAX_REPAIR_ATTEMPTS ]; do
         CURRENT_ATTEMPT=$((CURRENT_ATTEMPT + 1))
 
@@ -3803,13 +4933,43 @@ $context"
         fi
 
         # Generate code with AI
+        AI_LAST_TIMEOUT="false"
+        local attempt_start_time=$(date +%s)
         if ! run_ai_cli "$prompt_content"; then
             release_write_access
+            local attempt_duration=$(($(date +%s) - attempt_start_time))
+
+            # If the provider timed out, switch providers and retry
+            if [ "$AI_LAST_TIMEOUT" = "true" ]; then
+                log_warning "${AI_PROVIDER} timed out — switching providers and retrying"
+                if command -v record_provider_result >/dev/null 2>&1; then
+                    record_provider_result "$AI_PROVIDER" "$AI_LAST_TIMEOUT_TYPE" "$attempt_duration"
+                fi
+                if switch_ai_provider; then
+                    TIMEOUT_RETRY_COUNT=$((TIMEOUT_RETRY_COUNT + 1))
+                    if [ "$TIMEOUT_RETRY_COUNT" -gt "$MAX_TIMEOUT_RETRIES" ]; then
+                        log_error "Max timeout retries ($MAX_TIMEOUT_RETRIES) reached — treating as failure"
+                        update_session_context "$CURRENT_ATTEMPT" "provider_timeout" "All providers timed out after $MAX_TIMEOUT_RETRIES retries."
+                        is_followup="true"
+                        TIMEOUT_RETRY_COUNT=0
+                        continue
+                    fi
+                    CURRENT_ATTEMPT=$((CURRENT_ATTEMPT - 1))
+                    is_followup="false"
+                    continue
+                else
+                    log_error "No alternative provider available after timeout"
+                    update_session_context "$CURRENT_ATTEMPT" "provider_timeout" "${AI_PROVIDER} timed out and no alternative provider is available."
+                    is_followup="true"
+                    TIMEOUT_RETRY_COUNT=0
+                    continue
+                fi
+            fi
+
             update_session_context "$CURRENT_ATTEMPT" "ai_error" "AI CLI failed"
             log_error "AI CLI call failed"
-            # Note: run_ai_cli handles auth error detection internally
-            # Continue to next attempt
             is_followup="true"
+            TIMEOUT_RETRY_COUNT=0
             continue
         fi
 
@@ -3828,8 +4988,10 @@ $context"
         if run_build_lint; then
             release_build_access
             # Success!
+            TIMEOUT_RETRY_COUNT=0
             update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
             write_success_status
+            update_sidebar_stage "Complete"
             return 0
         fi
 
@@ -3951,11 +5113,43 @@ Please re-examine the relevant views and ensure every listed element has the cor
         fi
 
         # Generate code with AI
+        AI_LAST_TIMEOUT="false"
+        local attempt_start_time=$(date +%s)
         if ! run_ai_cli "$prompt_content"; then
             release_write_access
+            local attempt_duration=$(($(date +%s) - attempt_start_time))
+
+            # If the provider timed out, switch providers and retry
+            if [ "$AI_LAST_TIMEOUT" = "true" ]; then
+                log_warning "${AI_PROVIDER} timed out — switching providers and retrying"
+                if command -v record_provider_result >/dev/null 2>&1; then
+                    record_provider_result "$AI_PROVIDER" "$AI_LAST_TIMEOUT_TYPE" "$attempt_duration"
+                fi
+                if switch_ai_provider; then
+                    TIMEOUT_RETRY_COUNT=$((TIMEOUT_RETRY_COUNT + 1))
+                    if [ "$TIMEOUT_RETRY_COUNT" -gt "$MAX_TIMEOUT_RETRIES" ]; then
+                        log_error "Max timeout retries ($MAX_TIMEOUT_RETRIES) reached — treating as failure"
+                        update_session_context "$CURRENT_ATTEMPT" "provider_timeout" "All providers timed out after $MAX_TIMEOUT_RETRIES retries."
+                        is_followup="true"
+                        TIMEOUT_RETRY_COUNT=0
+                        continue
+                    fi
+                    CURRENT_ATTEMPT=$((CURRENT_ATTEMPT - 1))
+                    is_followup="false"
+                    continue
+                else
+                    log_error "No alternative provider available after timeout"
+                    update_session_context "$CURRENT_ATTEMPT" "provider_timeout" "${AI_PROVIDER} timed out and no alternative provider is available."
+                    is_followup="true"
+                    TIMEOUT_RETRY_COUNT=0
+                    continue
+                fi
+            fi
+
             update_session_context "$CURRENT_ATTEMPT" "ai_error" "AI CLI failed"
             log_error "AI CLI call failed"
             is_followup="true"
+            TIMEOUT_RETRY_COUNT=0
             continue
         fi
 
@@ -3973,7 +5167,10 @@ Please re-examine the relevant views and ensure every listed element has the cor
         # Verify build
         if run_build_lint; then
             release_build_access
+            TIMEOUT_RETRY_COUNT=0
             update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
+            # Record context outcome for VOI learning
+            record_context_outcome "$had_context" "$CURRENT_ATTEMPT"
             write_success_status
             return 0
         fi
@@ -3999,10 +5196,12 @@ Please re-examine the relevant views and ensure every listed element has the cor
 # ─────────────────────────────────────────────────────────────────────────────
 
 run_lint_only() {
+    update_sidebar_stage "Linting"
     log_section "Running initial lint/build check (no plan provided)"
     echo "" >&2
 
     CURRENT_ATTEMPT=0
+    TIMEOUT_RETRY_COUNT=0
 
     # Initialize session context file
     {
@@ -4022,9 +5221,11 @@ run_lint_only() {
     # Run initial build verification
     if run_build_lint; then
         release_build_access
+        TIMEOUT_RETRY_COUNT=0
         # Success! No errors to fix
         update_session_context "0" "success" "Build passed - no errors to fix"
         write_success_status
+        update_sidebar_stage "Complete"
         log_success "Build passed! No errors detected."
         return 0
     fi
@@ -4057,32 +5258,150 @@ run_lint_only() {
 # Main Execution Loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_build_loop() {
-    # Handle argent UI-error repair mode
-    if [ -n "$REPAIR_FROM_ERRORS_FILE" ]; then
-        run_repair_loop_with_argent_errors
-        return $?
+# ─────────────────────────────────────────────────────────────────────────────
+# Plan Discovery & Sequence Execution
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Discover plan files in a directory.
+# If sequence.md exists, parse it for the execution order.
+# Otherwise, auto-discover all *.md files (sorted).
+# Outputs one plan path per line.
+discover_plans_in_dir() {
+    local dir="$1"
+
+    # Check for sequence.md
+    if [ -f "${dir}/sequence.md" ]; then
+        log_info "Found sequence.md, using defined execution order"
+        while IFS= read -r line || [ -n "$line" ]; do
+            # Skip empty lines and markdown headers/comments
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+            # Remove markdown list markers and trim whitespace
+            local plan_path
+            plan_path=$(echo "$line" | sed -E 's/^[[:space:]]*([-*]|[0-9]+\.[[:space:]])*[[:space:]]*//' | sed 's/[[:space:]]*$//')
+
+            # Only keep lines that look like file paths ending in .md
+            if [[ "$plan_path" == *.md ]]; then
+                if [ -f "${dir}/${plan_path}" ]; then
+                    echo "${dir}/${plan_path}"
+                elif [ -f "$plan_path" ]; then
+                    echo "$plan_path"
+                else
+                    log_warning "Plan file not found: $plan_path"
+                fi
+            fi
+        done < "${dir}/sequence.md"
+        return 0
     fi
 
-    # Handle lint-only mode
-    if [ "$LINT_ONLY_MODE" = "true" ]; then
-        run_lint_only
-        return $?
-    fi
+    # Auto-discover all .md files up to 2 levels deep
+    log_info "No sequence.md found, auto-discovering plans"
+    find "$dir" -maxdepth 2 -name "*.md" -type f -print0 2>/dev/null | sort -z | while IFS= read -r -d '' file; do
+        echo "$file"
+    done
+}
 
+# Run a sequence of plans from PLAN_FILES array
+run_plans_sequence() {
+    local total_plans=${#PLAN_FILES[@]}
+    local overall_exit=0
+    local completed_plans=0
+
+    log_section "=========================================="
+    log_info "Plan Sequence: $total_plans plan(s) discovered"
+    log_section "=========================================="
+    for i in "${!PLAN_FILES[@]}"; do
+        log_info "  [$((i + 1))] $(basename "${PLAN_FILES[$i]}")"
+    done
+    echo "" >&2
+
+    for i in "${!PLAN_FILES[@]}"; do
+        CURRENT_PLAN_INDEX=$i
+        local plan_file="${PLAN_FILES[$i]}"
+        local plan_num=$((i + 1))
+
+        log_section "=========================================="
+        log_info "Executing plan $plan_num/$total_plans: $(basename "$plan_file")"
+        log_section "=========================================="
+        echo "" >&2
+
+        update_sidebar_stage "Plan $plan_num/$total_plans"
+
+        # Set current plan state
+        PLAN_FILE="$plan_file"
+        PROMPT_CONTENT=""
+        CURRENT_ATTEMPT=0
+        TIMEOUT_RETRY_COUNT=0
+        CURSOR_CHAT_ID=""
+
+        # Cache plan content
+        if [ -f "$PLAN_FILE" ]; then
+            PROMPT_CONTENT=$(cat "$PLAN_FILE" 2>/dev/null || true)
+            log_verbose "Cached plan content (${#PROMPT_CONTENT} chars)"
+        fi
+
+        # Run single plan build loop
+        local plan_exit=0
+        run_single_build_loop || plan_exit=$?
+
+        if [ $plan_exit -ne 0 ]; then
+            overall_exit=$plan_exit
+            log_error "Plan $plan_num failed with exit code $plan_exit"
+            break
+        fi
+
+        completed_plans=$((completed_plans + 1))
+        log_success "Plan $plan_num completed successfully"
+        echo "" >&2
+    done
+
+    log_section "=========================================="
+    if [ $overall_exit -eq 0 ]; then
+        log_success "All $total_plans plan(s) completed successfully"
+    else
+        log_error "Plan sequence stopped after $completed_plans/$total_plans plans"
+    fi
+    log_section "=========================================="
+
+    return $overall_exit
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single Plan Build Loop (extracted for plan sequence reuse)
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_single_build_loop() {
     local input_content
-    local context
+    local context=""
     local error_feedback=""
     local is_followup="false"
+    local had_context="false"
+
+    update_sidebar_stage "Planning"
 
     input_content=$(get_input_content)
+
+    # Try cached context first (fast). Only gather fresh if needed after first failure.
     context=$(gather_context)
+    if [ -n "$context" ]; then
+        had_context="true"
+    fi
 
     # Retrieve memory context from Letta if available
     retrieve_memory_context
 
     log_info "Input length: ${#input_content} chars"
-    log_info "Context length: ${#context} chars"
+    if [ -n "$context" ]; then
+        log_info "Context length: ${#context} chars"
+        if [ "${#context}" -gt "$MAX_CONTEXT_CHARS" ]; then
+            log_warning "Context truncated from ${#context} to ${MAX_CONTEXT_CHARS} chars (set MAX_CONTEXT_CHARS env var to override)"
+            context="${context:0:$MAX_CONTEXT_CHARS}"
+            context+="
+... [CONTEXT TRUNCATED — set MAX_CONTEXT_CHARS env var to increase limit] ..."
+        fi
+    else
+        log_info "No cached context — will gather fresh if build fails on first attempt"
+    fi
     [ -n "$LETTA_MEMORY_CONTEXT" ] && log_info "Memory context: available"
     log_info "Session ID: $SESSION_ID"
 
@@ -4096,8 +5415,69 @@ run_build_loop() {
         if [ -n "$CURSOR_CHAT_ID" ]; then
             echo "Cursor Chat ID: $CURSOR_CHAT_ID"
         fi
+        if [ ${#PLAN_FILES[@]} -gt 0 ]; then
+            echo "Plan: $((CURRENT_PLAN_INDEX + 1))/${#PLAN_FILES[@]} — $(basename "${PLAN_FILES[$CURRENT_PLAN_INDEX]}")"
+        fi
         echo ""
     } > "$SESSION_FILE"
+
+    # Parse todo file if provided
+    local todos_json="[]"
+    if [ -n "$TODO_FILE" ]; then
+        todos_json=$(parse_todo_file "$TODO_FILE")
+        log_info "Loaded $(echo "$todos_json" | grep -o '"id"' | wc -l | tr -d ' ') todo(s) from $TODO_FILE"
+    fi
+
+    # Check saved state for this prompt (unless --force)
+    local prompt_hash=""
+    if [ "$FORCE_RUN" != "true" ] && [ -n "$input_content" ]; then
+        prompt_hash=$(compute_prompt_hash "$input_content")
+        if check_prompt_already_done "$input_content"; then
+            log_info "This prompt was already completed in a previous session."
+            log_info "Use --force to re-run anyway."
+            update_session_context "0" "skipped" "Prompt already completed (hash: $prompt_hash)"
+            write_success_status
+            return 0
+        fi
+    fi
+
+    # Build-first mode: run build before any AI generation
+    if [ "$BUILD_FIRST_MODE" = "true" ]; then
+        log_section "Build-first check"
+
+        if acquire_build_access; then
+            if run_build_lint; then
+                release_build_access
+                log_success "Build already passes"
+
+                # If build passes and we have no prompt, we're done
+                if [ -z "$input_content" ]; then
+                    TIMEOUT_RETRY_COUNT=0
+                    update_session_context "0" "success" "Build passed — no prompt to implement"
+                    write_success_status
+                    return 0
+                fi
+
+                # If build passes and prompt was previously completed, we're done
+                if [ -n "$prompt_hash" ] && check_prompt_already_done "$input_content"; then
+                    log_success "Prompt already implemented and build passes — nothing to do"
+                    TIMEOUT_RETRY_COUNT=0
+                    update_session_context "0" "success" "Build passed, prompt already completed"
+                    write_success_status
+                    return 0
+                fi
+
+                log_info "Build passes but prompt may need implementation — continuing to AI"
+            else
+                release_build_access
+                log_warning "Build has errors — will use as initial feedback for AI repair"
+                error_feedback=$(get_error_feedback)
+                is_followup="true"
+            fi
+        else
+            log_warning "Could not acquire build lock for build-first check — continuing anyway"
+        fi
+    fi
 
     while [ $CURRENT_ATTEMPT -lt $MAX_REPAIR_ATTEMPTS ]; do
         CURRENT_ATTEMPT=$((CURRENT_ATTEMPT + 1))
@@ -4108,14 +5488,34 @@ run_build_loop() {
         log_section "────────────────────────────────────────"
         echo "" >&2
 
+        # Lazy context gathering: if no cache and first attempt failed, gather now
+        if [ -z "$context" ] && [ "$is_followup" = "true" ]; then
+            log_info "Gathering context for repair..."
+            context=$(gather_context)
+            if [ -n "$context" ]; then
+                log_info "Context length: ${#context} chars"
+                if [ "${#context}" -gt "$MAX_CONTEXT_CHARS" ]; then
+                    log_warning "Context truncated from ${#context} to ${MAX_CONTEXT_CHARS} chars (set MAX_CONTEXT_CHARS env var to override)"
+                    context="${context:0:$MAX_CONTEXT_CHARS}"
+                    context+="
+... [CONTEXT TRUNCATED — set MAX_CONTEXT_CHARS env var to increase limit] ..."
+                fi
+            fi
+        fi
+
         # Build prompt based on whether this is first attempt or follow-up
         local prompt
+        local current_strategy=""
+        local error_pattern=""
         if [ "$is_followup" = "false" ]; then
-            # First attempt: full context
+            # First attempt: use cached context if available, otherwise minimal prompt
             prompt=$(build_initial_prompt "$input_content" "$context")
         else
-            # Follow-up: include original task + error feedback (no cursor session memory)
-            prompt=$(build_followup_prompt "$error_feedback" "$CURRENT_ATTEMPT" "$input_content" "$context")
+            # Follow-up: classify error pattern and select best repair strategy
+            error_pattern=$(classify_error_pattern "$error_feedback")
+            current_strategy=$(select_repair_strategy "$error_pattern")
+            log_info "Error pattern: $error_pattern | Strategy: $current_strategy"
+            prompt=$(build_followup_prompt_with_strategy "$error_feedback" "$CURRENT_ATTEMPT" "$input_content" "$context" "$current_strategy")
         fi
 
         # Acquire write lock before code generation (prevents concurrent modifications)
@@ -4128,14 +5528,53 @@ run_build_loop() {
         fi
 
         # Run AI CLI with session
+        AI_LAST_TIMEOUT="false"
+        local attempt_start_time=$(date +%s)
         if ! run_ai_cli "$prompt" "$is_followup"; then
             release_write_access  # Release lock on failure
+            local attempt_duration=$(($(date +%s) - attempt_start_time))
+
+            # If the provider timed out (zero bytes), switch providers and retry
+            if [ "$AI_LAST_TIMEOUT" = "true" ]; then
+                log_warning "${AI_PROVIDER} timed out — switching providers and retrying"
+                if command -v record_provider_result >/dev/null 2>&1; then
+                    record_provider_result "$AI_PROVIDER" "$AI_LAST_TIMEOUT_TYPE" "$attempt_duration"
+                fi
+                if switch_ai_provider; then
+                    TIMEOUT_RETRY_COUNT=$((TIMEOUT_RETRY_COUNT + 1))
+                    if [ "$TIMEOUT_RETRY_COUNT" -gt "$MAX_TIMEOUT_RETRIES" ]; then
+                        log_error "Max timeout retries ($MAX_TIMEOUT_RETRIES) reached — treating as failure"
+                        error_feedback="All providers timed out after $MAX_TIMEOUT_RETRIES retries."
+                        update_session_context "$CURRENT_ATTEMPT" "provider_timeout" "$error_feedback"
+                        is_followup="true"
+                        TIMEOUT_RETRY_COUNT=0
+                        continue
+                    fi
+                    # Retry same attempt number with new provider
+                    CURRENT_ATTEMPT=$((CURRENT_ATTEMPT - 1))
+                    is_followup="false"
+                    continue
+                else
+                    log_error "No alternative provider available after timeout"
+                    error_feedback="${AI_PROVIDER} timed out and no alternative provider is available."
+                    update_session_context "$CURRENT_ATTEMPT" "provider_timeout" "$error_feedback"
+                    is_followup="true"
+                    TIMEOUT_RETRY_COUNT=0
+                    continue
+                fi
+            fi
+
             log_error "${AI_PROVIDER} CLI failed"
             error_feedback="${AI_PROVIDER} CLI invocation failed. Please try again."
             update_session_context "$CURRENT_ATTEMPT" "cursor_failed" "$error_feedback"
+            if command -v record_provider_result >/dev/null 2>&1; then
+                record_provider_result "$AI_PROVIDER" "failure" "$attempt_duration"
+            fi
             is_followup="true"
+            TIMEOUT_RETRY_COUNT=0
             continue
         fi
+        local ai_duration=$(($(date +%s) - attempt_start_time))
 
         # Release write lock, acquire build lock (allows other agents to queue up)
         release_write_access
@@ -4150,15 +5589,49 @@ run_build_loop() {
 
         # Run build verification
         local build_result=0
+        local build_start_time=$(date +%s)
         if run_build_lint; then
             release_build_access  # Release lock after build
-            # Success!
+            TIMEOUT_RETRY_COUNT=0
+            local build_duration=$(($(date +%s) - build_start_time))
+            # Success! Record provider result with total duration (AI + build)
+            if command -v record_provider_result >/dev/null 2>&1; then
+                record_provider_result "$AI_PROVIDER" "success" "$((ai_duration + build_duration))"
+            fi
             update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
+            # Record repair strategy success
+            if [ -n "$current_strategy" ] && [ -n "$error_pattern" ]; then
+                record_repair_result "$error_pattern" "$current_strategy" "success"
+                log_info "Repair strategy '$current_strategy' succeeded for pattern '$error_pattern'"
+            fi
+            # Persist completion state
+            if [ -n "$input_content" ]; then
+                local prompt_hash
+                prompt_hash=$(compute_prompt_hash "$input_content")
+                local todos_json="[]"
+                if [ -n "$TODO_FILE" ] && [ -f "$TODO_FILE" ]; then
+                    todos_json=$(parse_todo_file "$TODO_FILE")
+                fi
+                save_build_state "$prompt_hash" "completed" "$todos_json"
+                log_info "Prompt completion saved to state (hash: $prompt_hash)"
+            fi
             write_success_status
             return 0
         fi
 
         release_build_access  # Release lock after build (even on failure)
+        local build_duration=$(($(date +%s) - build_start_time))
+
+        # Record provider result (build failed but AI responded)
+        if command -v record_provider_result >/dev/null 2>&1; then
+            record_provider_result "$AI_PROVIDER" "failure" "$((ai_duration + build_duration))"
+        fi
+
+        # Record repair strategy failure
+        if [ -n "$current_strategy" ] && [ -n "$error_pattern" ]; then
+            record_repair_result "$error_pattern" "$current_strategy" "failure"
+            log_info "Repair strategy '$current_strategy' failed for pattern '$error_pattern'"
+        fi
 
         # Get error feedback for next attempt
         error_feedback=$(get_error_feedback)
@@ -4172,10 +5645,34 @@ run_build_loop() {
         fi
     done
 
-    # Max attempts reached
+    # Max attempts reached — record context outcome before exiting
+    record_context_outcome "${had_context:-false}" "$CURRENT_ATTEMPT"
     log_error "Build failed after $MAX_REPAIR_ATTEMPTS attempts"
     write_human_intervention
     return 20
+}
+
+run_build_loop() {
+    # Handle plans directory mode
+    if [ ${#PLAN_FILES[@]} -gt 0 ]; then
+        run_plans_sequence
+        return $?
+    fi
+
+    # Handle argent UI-error repair mode
+    if [ -n "$REPAIR_FROM_ERRORS_FILE" ]; then
+        run_repair_loop_with_argent_errors
+        return $?
+    fi
+
+    # Handle lint-only mode
+    if [ "$LINT_ONLY_MODE" = "true" ]; then
+        run_lint_only
+        return $?
+    fi
+
+    run_single_build_loop
+    return $?
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4196,6 +5693,10 @@ main() {
         case "$1" in
             --plan)
                 PLAN_FILE="${2:-}"
+                shift 2
+                ;;
+            --plans-dir)
+                PLANS_DIR="${2:-}"
                 shift 2
                 ;;
             --prompt)
@@ -4233,6 +5734,10 @@ main() {
                 ;;
             --ai-model)
                 AI_MODEL="${2:-}"
+                shift 2
+                ;;
+            --provider-strategy)
+                PROVIDER_STRATEGY="${2:-auto}"
                 shift 2
                 ;;
             --target-id)
@@ -4273,8 +5778,20 @@ main() {
                 STREAM_OUTPUT="true"
                 shift 1
                 ;;
+            --no-stream-heartbeat)
+                STREAM_HEARTBEAT_ENABLED="false"
+                shift 1
+                ;;
+            --sidebar)
+                SIDEBAR_MODE="true"
+                shift 1
+                ;;
             --skip-chat-id)
                 SKIP_CHAT_ID_CAPTURE="true"
+                shift 1
+                ;;
+            --skip-stage)
+                SKIP_STAGE_PROMPT="true"
                 shift 1
                 ;;
             --dry-run)
@@ -4494,6 +6011,35 @@ main() {
                 REPAIR_FROM_ERRORS_FILE="$2"
                 shift 2
                 ;;
+            --parallel-platforms)
+                AUTO_MULTI_PLATFORM="true"
+                shift 1
+                ;;
+            --max-parallel-platforms)
+                MULTI_PLATFORM_PARALLELISM="${2:-0}"
+                shift 2
+                ;;
+            --build-first)
+                BUILD_FIRST_MODE="true"
+                shift 1
+                ;;
+            --todo-file)
+                TODO_FILE="${2:-}"
+                if [ -n "$TODO_FILE" ] && [ ! -f "$TODO_FILE" ]; then
+                    log_error "--todo-file: file not found: $TODO_FILE"
+                    exit 11
+                fi
+                shift 2
+                ;;
+            --force)
+                FORCE_RUN="true"
+                shift 1
+                ;;
+            --force)
+                FORCE_RUN="true"
+                log_info "Force mode: ignoring saved state"
+                shift 1
+                ;;
             --help|-h)
                 show_usage
                 exit 0
@@ -4551,10 +6097,27 @@ main() {
     # Traycer deletes temp files after 30 seconds, so read them NOW before any slow operations
     if [ -n "$PROMPT_FILE" ] && [ -f "$PROMPT_FILE" ] && [ -z "$PROMPT_CONTENT" ]; then
         PROMPT_CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || true)
-        [ "${VERBOSE:-false}" = "true" ] && echo "[VERBOSE] Early-cached prompt content (${#PROMPT_CONTENT} chars)" >&2
+        if [ "${VERBOSE:-false}" = "true" ]; then echo "[VERBOSE] Early-cached prompt content (${#PROMPT_CONTENT} chars)" >&2; fi
     elif [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ] && [ -z "$PROMPT_CONTENT" ]; then
         PROMPT_CONTENT=$(cat "$PLAN_FILE" 2>/dev/null || true)
-        [ "${VERBOSE:-false}" = "true" ] && echo "[VERBOSE] Early-cached plan content (${#PROMPT_CONTENT} chars)" >&2
+        if [ "${VERBOSE:-false}" = "true" ]; then echo "[VERBOSE] Early-cached plan content (${#PROMPT_CONTENT} chars)" >&2; fi
+    fi
+
+    # Discover plans in --plans-dir
+    if [ -n "$PLANS_DIR" ]; then
+        if [ ! -d "$PLANS_DIR" ]; then
+            log_error "Plans directory not found: $PLANS_DIR"
+            exit 11
+        fi
+        mapfile -t PLAN_FILES < <(discover_plans_in_dir "$PLANS_DIR")
+        if [ ${#PLAN_FILES[@]} -eq 0 ]; then
+            log_error "No plan files found in: $PLANS_DIR"
+            exit 11
+        fi
+        log_info "Discovered ${#PLAN_FILES[@]} plan(s) in $PLANS_DIR"
+        for i in "${!PLAN_FILES[@]}"; do
+            log_info "  [$((i + 1))] ${PLAN_FILES[$i]}"
+        done
     fi
 
     # Initialize UI system
@@ -4635,9 +6198,19 @@ main() {
     fi
     echo "" >&2
 
+    # Enable sidebar mode before starting build loop (if requested)
+    if [ "$SIDEBAR_MODE" = "true" ]; then
+        enable_sidebar_mode
+    fi
+
     # Run the build loop
     local exit_code=0
     run_build_loop || exit_code=$?
+
+    # Disable sidebar mode after build loop completes
+    if [ "$SIDEBAR_MODE_ACTIVE" = "true" ]; then
+        disable_sidebar_mode
+    fi
 
     echo "" >&2
     log_section "=========================================="

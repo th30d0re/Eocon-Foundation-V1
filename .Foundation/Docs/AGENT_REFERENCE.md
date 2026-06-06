@@ -11,6 +11,7 @@ Complete reference for all Eocon Foundation agents with flags, features, and exa
 - [uiTestAgent](#uitestagent)
 - [accessibilityAgent](#accessibilityagent)
 - [flowAgent](#flowagent)
+- [argentRuntimeAgent](#argentruntimeagent)
 - [Common Flags](#common-flags)
 - [Session Integration](#session-integration)
 
@@ -421,6 +422,66 @@ For more details, see [Shell Compatibility Guide](SHELL_COMPATIBILITY.md).
 ./flowAgent.sh \
   --flow-file flows/checkout.json \
   --simulator-name "iPhone 15 Pro"
+```
+
+---
+
+## argentRuntimeAgent
+
+**Purpose**: Execute user flows against the live app on a simulator using Argent CLI. Produces verification results, screenshots, and structured error output for the repair cycle.
+
+**Location**: `.Foundation/Agents/phases/phase5/argentRuntimeAgent.sh`
+
+> ⚠️ **Prerequisite**: Run `npx @swmansion/argent init` once in the project root before use. Without it `argent` will not be on PATH and Stage 5b will auto-skip.
+
+### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--simulator <name>` | string | required | Simulator name (resolved to UDID via `simulator.sh`) |
+| `--artifacts-dir <path>` | string | auto | Artifacts output directory |
+| `--app-path <path>` | string | auto | Explicit `.app` bundle path (auto-detected from `build_output.txt` if omitted) |
+| `--flows <path>` | string | auto | Path to `flows.json` (defaults to `Artifacts/<run>/flows.json`) |
+| `--skip-flows` | boolean | false | Skip flow execution; run smoke test only (launch + no crash = pass) |
+| `--verbose` | boolean | false | Enable verbose output |
+| `--dry-run` | boolean | false | Show what would be done without executing |
+
+### Exit Codes
+
+| Code | Meaning | Pipeline Effect |
+|------|---------|-----------------|
+| 0 | All flows passed | Proceed to report stage |
+| 10 | Verification failed | Triggers `BuildAgent --repair-from-errors` repair cycle |
+| 11 | Misconfiguration | Stage skipped with warning; pipeline continues |
+
+### Examples
+
+#### Basic Run with Simulator Name
+
+```bash
+./argentRuntimeAgent.sh --simulator "iPhone 16 Pro"
+```
+
+#### Explicit App Path
+
+```bash
+./argentRuntimeAgent.sh \
+  --simulator "iPhone 16 Pro" \
+  --app-path /path/to/MyApp.app
+```
+
+#### Skip Argent Stage (via testAgent)
+
+```bash
+# Pass --skip-argent to testAgent.sh; it forwards the flag to suppress Stage 5b
+./testAgent.sh --scheme MyApp --simulator-name "iPhone 16 Pro" --skip-argent
+```
+
+#### Smoke Test Only (No Flows)
+
+```bash
+# Launch the app and verify it does not crash — no flows.json required
+./argentRuntimeAgent.sh --simulator "iPhone 16 Pro" --skip-flows
 ```
 
 ---
