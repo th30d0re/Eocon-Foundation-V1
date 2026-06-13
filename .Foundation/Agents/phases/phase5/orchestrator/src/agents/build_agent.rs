@@ -61,10 +61,24 @@ pub fn build_agent_cmd(
         "BuildAgent".to_string()
     };
 
+    // Derive cwd from project path so artifacts, git, and auto-detection
+    // happen in the project directory, not the orch launch directory.
+    // .xcodeproj and .xcworkspace are directory bundles on macOS, so we
+    // must use their parent as the cwd.
+    let cwd = project.and_then(|p| {
+        let path = std::path::Path::new(p);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if path.is_dir() && ext != "xcodeproj" && ext != "xcworkspace" {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            path.parent().map(|d| d.to_string_lossy().into_owned())
+        }
+    });
+
     AgentCmd {
         program,
         args,
         env: vec![],
-        cwd: Some(agents_dir.to_string_lossy().into_owned()),
+        cwd,
     }
 }

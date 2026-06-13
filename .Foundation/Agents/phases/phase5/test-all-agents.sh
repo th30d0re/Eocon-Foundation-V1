@@ -262,6 +262,73 @@ fi
 
 echo
 
+# ─────────────────────────────────────────────────────────────────────────────
+# shellcheck stage — lint all lib/build/*.sh modules
+# ─────────────────────────────────────────────────────────────────────────────
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}shellcheck: lib/build/*.sh${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+TOTAL=$((TOTAL + 1))
+if ! command -v shellcheck >/dev/null 2>&1; then
+    echo -e "${YELLOW}⚠${NC}  shellcheck not installed — skipping (install via: brew install shellcheck)"
+    PASSED=$((PASSED + 1))
+elif [[ ! -d "${SCRIPT_DIR}/lib/build" ]]; then
+    echo -e "${YELLOW}⚠${NC}  lib/build/ not found — skipping"
+    PASSED=$((PASSED + 1))
+else
+    SC_ERRORS=0
+    for lib_file in "${SCRIPT_DIR}/lib/build/"*.sh; do
+        [[ -f "$lib_file" ]] || continue
+        if shellcheck -S warning -e SC1090,SC1091,SC2154,SC2034 "$lib_file" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} $(basename "$lib_file")"
+        else
+            echo -e "  ${RED}✗${NC} $(basename "$lib_file") — shellcheck errors (run: shellcheck $lib_file)"
+            SC_ERRORS=$((SC_ERRORS + 1))
+        fi
+    done
+    if [[ $SC_ERRORS -eq 0 ]]; then
+        echo -e "${GREEN}✓${NC} All lib/build/*.sh passed shellcheck"
+        PASSED=$((PASSED + 1))
+    else
+        echo -e "${RED}✗${NC} $SC_ERRORS lib/build/*.sh file(s) have shellcheck warnings"
+        FAILED=$((FAILED + 1))
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bats stage — run characterization test suite
+# ─────────────────────────────────────────────────────────────────────────────
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}bats: tests/bats/\${module}.bats${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+TOTAL=$((TOTAL + 1))
+BATS_BIN="${SCRIPT_DIR}/tests/bats/lib/bats-core/bin/bats"
+BATS_DIR="${SCRIPT_DIR}/tests/bats"
+if [[ ! -x "$BATS_BIN" ]]; then
+    echo -e "${YELLOW}⚠${NC}  bats-core not found at tests/bats/lib/bats-core/"
+    echo -e "   Run: git submodule update --init  (or clone bats-core manually)"
+    FAILED=$((FAILED + 1))
+elif [[ ! -d "$BATS_DIR" ]]; then
+    echo -e "${YELLOW}⚠${NC}  tests/bats/ directory not found — skipping"
+    PASSED=$((PASSED + 1))
+else
+    BATS_FILES=("${BATS_DIR}/"*.bats)
+    if [[ ${#BATS_FILES[@]} -eq 0 ]] || [[ ! -f "${BATS_FILES[0]}" ]]; then
+        echo -e "${YELLOW}⚠${NC}  No .bats files found in tests/bats/"
+        PASSED=$((PASSED + 1))
+    else
+        if "$BATS_BIN" "${BATS_FILES[@]}" 2>&1; then
+            echo -e "${GREEN}✓${NC} All bats tests passed"
+            PASSED=$((PASSED + 1))
+        else
+            echo -e "${RED}✗${NC} Some bats tests failed (see output above)"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+fi
+
+echo
+
 # Exit with appropriate code
 if [[ $FAILED -gt 0 ]]; then
     echo -e "${RED}Some tests failed!${NC}"

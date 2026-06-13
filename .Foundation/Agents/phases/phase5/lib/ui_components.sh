@@ -1325,7 +1325,7 @@ draw_sidebar_header() {
     fi
 
     local attempt_info="Attempt ${CURRENT_ATTEMPT:-0}/${MAX_REPAIR_ATTEMPTS:-3}"
-    local provider="${AI_PROVIDER:-copilot}"
+    local provider="${AI_PROVIDER:-claude}"
 
     # ── Line 1: Title bar ─────────────────────────────────────────────────────
     local title=" ${SIDEBAR_TITLE:-BuildAgent} "

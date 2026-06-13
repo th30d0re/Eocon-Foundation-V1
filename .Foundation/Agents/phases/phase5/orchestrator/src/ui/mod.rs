@@ -2,6 +2,7 @@ pub mod confirm;
 pub mod layout;
 pub mod panes;
 pub mod picker;
+pub mod pipeline;
 pub mod prompt;
 pub mod status_bar;
 pub mod theme;
@@ -16,8 +17,13 @@ use crate::app::App;
 
 /// Render the full UI in a single draw() call.
 pub fn render(frame: &mut Frame, app: &App) {
-    let (interaction, output, info_line, info_panel, info_extra, input) =
-        layout::compute(frame.area(), app.pane_layout, app.bottom_expanded);
+    let show_pipeline = pipeline::should_show(app);
+    let (pipeline, interaction, output, info_line, info_panel, info_extra, input) =
+        layout::compute(frame.area(), app.pane_layout, app.bottom_expanded, show_pipeline);
+
+    if let Some(rect) = pipeline {
+        frame.render_widget(pipeline::pipeline_tracker(app), rect);
+    }
 
     if app.pane_layout != crate::app::PaneLayout::OutputOnly {
         frame.render_widget(panes::interaction(app), interaction);
@@ -89,6 +95,41 @@ mod tests {
     use ratatui::Terminal;
 
     use super::*;
+
+    #[test]
+    fn pipeline_tracker_renders_during_test_phase() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(false);
+        app.phase = crate::app::Phase::Test;
+        // Trigger the running heuristic by having first stage as pending.
+        app.pipeline_stages[0].status = crate::app::StageStatus::Pending;
+
+        terminal
+            .draw(|frame| render(frame, &app))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Pipeline tracker should be at rows 0-1 (2 rows with top border).
+        let row0: String = (0..80)
+            .map(|col| buf[(col, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            row0.contains("Pipeline"),
+            "pipeline tracker title missing. got: {}",
+            row0.trim()
+        );
+
+        // Row 1 should contain the first stage "Unit".
+        let row1: String = (0..80)
+            .map(|col| buf[(col, 1)].symbol().to_string())
+            .collect();
+        assert!(
+            row1.contains("Unit"),
+            "pipeline tracker content missing. got: {}",
+            row1.trim()
+        );
+    }
 
     #[test]
     fn mock_render_shows_info_and_input() {

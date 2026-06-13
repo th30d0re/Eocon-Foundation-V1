@@ -23,6 +23,26 @@ _detect_os() {
 
 OS_TYPE=$(_detect_os)
 
+# Ensure common tool directories are in PATH (macOS Homebrew, local installs, etc.)
+_foundation_ensure_path() {
+    local _dirs=""
+    case "$OS_TYPE" in
+        macos)
+            _dirs="/usr/local/bin /opt/homebrew/bin /opt/local/bin ~/.local/bin ~/.cargo/bin"
+            ;;
+        linux)
+            _dirs="/usr/local/bin ~/.local/bin ~/.cargo/bin"
+            ;;
+    esac
+    for _dir in $_dirs; do
+        _dir="${_dir/#\~/$HOME}"
+        if [ -d "$_dir" ] && [[ ":$PATH:" != *":$_dir:"* ]]; then
+            PATH="$_dir:$PATH"
+        fi
+    done
+}
+_foundation_ensure_path
+
 # Shell Compatibility Functions
 # Ensures scripts are running in bash with minimum required version
 

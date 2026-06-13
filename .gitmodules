@@ -1,0 +1,3 @@
+[submodule ".Foundation/Agents/phases/phase5/tests/bats/lib/bats-core"]
+	path = .Foundation/Agents/phases/phase5/tests/bats/lib/bats-core
+	url = https://github.com/bats-core/bats-core.git

@@ -14,21 +14,21 @@ pub fn test_agent_cmd(
     project: Option<&str>,
     scheme: Option<&str>,
     ai_provider: Option<&str>,
-    model: Option<&str>,
+    _model: Option<&str>,
     simulator_name: Option<&str>,
     stage: Option<&str>,
     resume_from: Option<&str>,
     verbose: bool,
     dry_run: bool,
+    coverage: Option<u8>,
+    strategy: Option<&str>,
+    files: Option<&str>,
+    happy_only: bool,
 ) -> AgentCmd {
-    let mut args = vec!["--yolo".to_string()];
+    let mut args = vec![];
 
     if let Some(v) = ai_provider {
         args.push("--ai-provider".to_string());
-        args.push(v.to_string());
-    }
-    if let Some(v) = model {
-        args.push("--ai-model".to_string());
         args.push(v.to_string());
     }
     if let Some(v) = project {
@@ -51,6 +51,21 @@ pub fn test_agent_cmd(
         args.push("--resume-from".to_string());
         args.push(v.to_string());
     }
+    if let Some(v) = coverage {
+        args.push("--coverage".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = strategy {
+        args.push("--strategy".to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = files {
+        args.push("--files".to_string());
+        args.push(v.to_string());
+    }
+    if happy_only {
+        args.push("--happy-only".to_string());
+    }
     if verbose {
         args.push("--verbose".to_string());
     }
@@ -68,10 +83,24 @@ pub fn test_agent_cmd(
         "testAgent".to_string()
     };
 
+    // Derive cwd from project path so artifacts, git, and auto-detection
+    // happen in the project directory, not the orch launch directory.
+    // .xcodeproj and .xcworkspace are directory bundles on macOS, so we
+    // must use their parent as the cwd.
+    let cwd = project.and_then(|p| {
+        let path = std::path::Path::new(p);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if path.is_dir() && ext != "xcodeproj" && ext != "xcworkspace" {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            path.parent().map(|d| d.to_string_lossy().into_owned())
+        }
+    });
+
     AgentCmd {
         program,
         args,
-        env: vec![("SKIP_STAGE_PROMPT".to_string(), "1".to_string())],
-        cwd: Some(agents_dir.to_string_lossy().into_owned()),
+        env: vec![("SKIP_STAGE_PROMPT".to_string(), "true".to_string())],
+        cwd,
     }
 }

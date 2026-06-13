@@ -167,8 +167,8 @@ pub struct CliArgs {
 
 /// Build a `PtySize` from terminal dimensions and current pane layout.
 /// All values are derived from the live terminal; nothing is hardcoded.
-fn pty_size(term_cols: u16, term_rows: u16, pane_layout: PaneLayout, bottom_expanded: bool) -> PtySize {
-    let (rows, cols) = layout::output_inner_size(term_cols, term_rows, pane_layout, bottom_expanded);
+fn pty_size(term_cols: u16, term_rows: u16, pane_layout: PaneLayout, bottom_expanded: bool, show_pipeline: bool) -> PtySize {
+    let (rows, cols) = layout::output_inner_size(term_cols, term_rows, pane_layout, bottom_expanded, show_pipeline);
     PtySize {
         rows,
         cols,
@@ -187,7 +187,8 @@ fn sync_pty_size(
     term_cols: u16,
     term_rows: u16,
 ) {
-    let size = pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded);
+    let show_pipeline = crate::ui::pipeline::should_show(app);
+    let size = pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded, show_pipeline);
     let (old_vrows, old_vcols) = app.screen.visible_dims();
     let new_rows = size.rows as usize;
     let new_cols = size.cols as usize;
@@ -228,7 +229,7 @@ pub fn run(config: Config) -> Result<()> {
     if !config.mock {
         app.interaction.push(crate::app::InteractionMessage {
             voice: crate::ui::theme::Voice::Agent,
-            text: "Welcome to Foundation Orchestrator!\nType /build to start a build, /test to run tests, or /help for more commands.".to_string(),
+            text: "Welcome to Foundation Orchestrator — Claude Fable 5 is at the helm.\nType /build to start a build, /test to run tests, or /help for more commands.".to_string(),
         });
     }
 
@@ -301,7 +302,8 @@ pub fn run(config: Config) -> Result<()> {
                         config.verbose,
                         config.dry_run,
                     );
-                    match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded)) {
+                    let show_pipeline = crate::ui::pipeline::should_show(&app);
+                    match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded, show_pipeline)) {
                         Ok((c, m, w, rx)) => {
                             child_opt = Some(c);
                             master_opt = Some(m);
@@ -332,8 +334,13 @@ pub fn run(config: Config) -> Result<()> {
                         resume_from,
                         config.verbose,
                         config.dry_run,
+                        app.test_coverage,
+                        app.test_strategy.as_deref(),
+                        app.test_files.as_deref(),
+                        app.test_happy_only,
                     );
-                    match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded)) {
+                    let show_pipeline = crate::ui::pipeline::should_show(&app);
+                    match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded, show_pipeline)) {
                         Ok((c, m, w, rx)) => {
                             child_opt = Some(c);
                             master_opt = Some(m);
@@ -440,7 +447,8 @@ pub fn run(config: Config) -> Result<()> {
                 env: Vec::new(),
                 cwd: Some(cwd),
             };
-            match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded)) {
+            let show_pipeline = crate::ui::pipeline::should_show(&app);
+            match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded, show_pipeline)) {
                 Ok((c, _m, _w, rx)) => {
                     apply_child_opt = Some(c);
                     apply_rx_opt = Some(rx);

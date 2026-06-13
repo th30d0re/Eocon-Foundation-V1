@@ -62,6 +62,48 @@ pub enum SpawnRequest {
     Test,
 }
 
+/// Status of an individual pipeline stage for the visualizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StageStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+/// A single stage in the Phase 5 test pipeline.
+#[derive(Debug, Clone, Default)]
+pub struct PipelineStage {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub status: StageStatus,
+    pub duration: u64,
+    pub coverage: u8,
+}
+
+/// Phase 5 TestAgent pipeline stages in execution order.
+pub const PHASE5_STAGES: &[(&str, &str)] = &[
+    ("unit", "Unit"),
+    ("accessibility", "A11y"),
+    ("flow", "Flow"),
+    ("discover", "Discover"),
+    ("ui", "UI"),
+    ("run", "Run"),
+    ("maestro", "Maestro"),
+    ("argent", "Argent"),
+];
+
+/// BuildAgent pipeline stages in execution order.
+pub const BUILD_STAGES: &[(&str, &str)] = &[
+    ("context", "Context"),
+    ("generate", "Generate"),
+    ("build", "Build"),
+    ("repair", "Repair"),
+    ("complete", "Done"),
+];
+
 impl PaneLayout {
     pub fn next(self) -> Self {
         match self {
@@ -94,6 +136,10 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "/test-stage", description: "Run a single TestAgent stage", takes_arg: true, arg_hint: "<stage>" },
     SlashCommand { name: "/provider", description: "Switch AI provider", takes_arg: true, arg_hint: "<provider>" },
     SlashCommand { name: "/model", description: "Switch AI model", takes_arg: true, arg_hint: "<model>" },
+    SlashCommand { name: "/coverage", description: "Set target test coverage %", takes_arg: true, arg_hint: "<percent>" },
+    SlashCommand { name: "/strategy", description: "Set test strategy", takes_arg: true, arg_hint: "<priority|coverage|balanced|happy-only>" },
+    SlashCommand { name: "/files", description: "Set test file scope pattern", takes_arg: true, arg_hint: "<pattern>" },
+    SlashCommand { name: "/happy-only", description: "Toggle happy-path-only mode", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/skip", description: "Skip current phase", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/status", description: "Show current status", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/info", description: "Toggle info panel view", takes_arg: false, arg_hint: "" },
@@ -111,7 +157,7 @@ pub const PROVIDERS: &[(&str, &[&str])] = &[
     ("openai", &["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview", "o1-mini"]),
     ("codex", &["o3", "o4-mini", "gpt-5.5"]),
     ("cursor", &["cursor-small", "cursor-large"]),
-    ("anthropic", &["claude-sonnet-4", "claude-opus-4", "claude-sonnet-3-5", "claude-haiku-3-5"]),
+    ("anthropic", &["claude-fable-5", "claude-sonnet-4", "claude-opus-4", "claude-sonnet-3-5", "claude-haiku-3-5"]),
     ("google", &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]),
     ("ollama", &["llama3", "llama3.1", "mistral", "codellama", "qwen2.5"]),
     ("openrouter", &["auto", "openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro"]),
@@ -169,6 +215,22 @@ pub struct App {
     pub apply_build_exit: Option<i32>,
     /// Which pane currently has focus for arrow-key scrolling.
     pub focused_pane: FocusedPane,
+    /// Target test coverage percentage (e.g., 80).
+    pub test_coverage: Option<u8>,
+    /// Test generation strategy: priority, coverage, balanced, happy-only.
+    pub test_strategy: Option<String>,
+    /// File scope pattern for TestAgent (e.g., "Sources/Models/*.swift").
+    pub test_files: Option<String>,
+    /// Only run happy-path tests across all stages.
+    pub test_happy_only: bool,
+    /// Phase 5 TestAgent pipeline stage statuses for the visualizer.
+    pub pipeline_stages: Vec<PipelineStage>,
+    /// Directory of the current test run (where stages.json lives).
+    pub pipeline_run_dir: Option<PathBuf>,
+    /// BuildAgent pipeline stage statuses for the visualizer.
+    pub build_stages: Vec<PipelineStage>,
+    /// Directory of the current build run (where build_stages.json lives).
+    pub build_run_dir: Option<PathBuf>,
 }
 
 /// Fun status messages shown on the info line (Claude Code style).
@@ -229,8 +291,8 @@ impl App {
             mock_mode,
             input_buffer: String::new(),
             input_cursor: 0,
-            current_provider: Some("moonshot".to_string()),
-            current_model: Some("kimi-k2.6".to_string()),
+            current_provider: Some("anthropic".to_string()),
+            current_model: Some("claude-fable-5".to_string()),
             info_view: InfoView::Metrics,
             agents_dir: cwd.clone(),
             project: None,
@@ -252,6 +314,26 @@ impl App {
             pending_changes: Vec::new(),
             apply_phase: ApplyPhase::Idle,
             apply_build_exit: None,
+            test_coverage: None,
+            test_strategy: None,
+            test_files: None,
+            test_happy_only: false,
+            pipeline_stages: PHASE5_STAGES.iter().map(|(k, l)| PipelineStage {
+                key: k,
+                label: l,
+                status: StageStatus::Pending,
+                duration: 0,
+                coverage: 0,
+            }).collect(),
+            pipeline_run_dir: None,
+            build_stages: BUILD_STAGES.iter().map(|(k, l)| PipelineStage {
+                key: k,
+                label: l,
+                status: StageStatus::Pending,
+                duration: 0,
+                coverage: 0,
+            }).collect(),
+            build_run_dir: None,
         };
 
         if mock_mode {
@@ -317,6 +399,11 @@ impl App {
                 self.tick_count += 1;
                 if self.mock_mode {
                     mock::update_mock(self);
+                }
+                match self.phase {
+                    Phase::Build => self.refresh_build_pipeline_status(),
+                    Phase::Test => self.refresh_pipeline_status(),
+                    _ => {}
                 }
             }
             Action::Tab => {
@@ -403,10 +490,12 @@ impl App {
                         self.build_exit = Some(code);
                         self.agent_state = AgentState::Idle;
                         self.command_started = None;
+                        self.refresh_build_pipeline_status();
                         if code == 0 {
+                            let scope_msg = self.detect_build_scope();
                             self.interaction.push(InteractionMessage {
                                 voice: Voice::Agent,
-                                text: "Build passed. Type /test to run tests.".to_string(),
+                                text: format!("Build passed. {}{}", scope_msg, " Type /test to run tests."),
                             });
                         } else if code == 10 {
                             self.phase = Phase::Failed;
@@ -427,6 +516,7 @@ impl App {
                         self.test_exit = Some(code);
                         self.agent_state = AgentState::Idle;
                         self.command_started = None;
+                        self.refresh_pipeline_status();
                         if code == 0 {
                             self.phase = Phase::Complete;
                             self.interaction.push(InteractionMessage {
@@ -496,14 +586,14 @@ impl App {
                 if self.picker_open && self.picker_selected > 0 {
                     self.picker_selected -= 1;
                 } else if !self.picker_open {
-                    self.scroll_focused_pane(-1);
+                    self.scroll_focused_pane(1);
                 }
             }
             Action::PickerDown => {
                 if self.picker_open && self.picker_selected + 1 < self.picker_filtered.len() {
                     self.picker_selected += 1;
                 } else if !self.picker_open {
-                    self.scroll_focused_pane(1);
+                    self.scroll_focused_pane(-1);
                 }
             }
             Action::FocusLeft => {
@@ -521,16 +611,16 @@ impl App {
                 };
             }
             Action::ScrollUp => {
-                self.interaction_scroll += 5;
-            }
-            Action::ScrollDown => {
                 self.interaction_scroll = self.interaction_scroll.saturating_sub(5);
             }
+            Action::ScrollDown => {
+                self.interaction_scroll += 5;
+            }
             Action::OutputScrollUp => {
-                self.screen.scroll_up(5);
+                self.screen.scroll_down(5);
             }
             Action::OutputScrollDown => {
-                self.screen.scroll_down(5);
+                self.screen.scroll_up(5);
             }
         }
     }
@@ -552,6 +642,274 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Detect files modified by the last build via `git diff` and write a
+    /// `.build_scope.json` artifact. Returns a user-facing message.
+    fn detect_build_scope(&mut self) -> String {
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "HEAD"])
+            .current_dir(&self.cwd)
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| {
+                        !s.is_empty()
+                        && !s.starts_with("Artifacts/")
+                        && !s.starts_with(".git/")
+                        && !s.starts_with("node_modules/")
+                        && !s.starts_with("Pods/")
+                        && !s.starts_with(".build/")
+                        && !s.starts_with("DerivedData/")
+                        && !s.contains(".DS_Store")
+                        && !s.ends_with(".log")
+                        && !s.ends_with(".tmp")
+                        && !s.ends_with(".bak")
+                    })
+                    .collect();
+
+                if files.is_empty() {
+                    return "No modified files detected.".to_string();
+                }
+
+                // Write artifact for TestAgent to consume.
+                let artifacts_dir = self.cwd.join("Artifacts");
+                if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
+                    // Find the most recent build_* directory.
+                    let mut latest: Option<std::path::PathBuf> = None;
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with("build_") && entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            latest = match latest {
+                                None => Some(entry.path()),
+                                Some(ref l) if entry.path() > *l => Some(entry.path()),
+                                other => other,
+                            };
+                        }
+                    }
+                    if let Some(dir) = latest {
+                        let scope_path = dir.join(".build_scope.json");
+                        let json = format!(
+                            "{{\"modified_files\":{:?},\"timestamp\":{}}}",
+                            files,
+                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+                        );
+                        let _ = std::fs::write(&scope_path, json);
+                    }
+                }
+
+                // Auto-set file scope for next TestAgent run.
+                let pattern = if files.len() == 1 {
+                    files[0].clone()
+                } else {
+                    // Find longest common prefix across all files.
+                    let mut prefix = files[0].clone();
+                    for f in &files[1..] {
+                        while !f.starts_with(&prefix) {
+                            prefix.pop();
+                            if prefix.is_empty() { break; }
+                        }
+                        if prefix.is_empty() { break; }
+                    }
+                    if let Some(idx) = prefix.rfind('/') {
+                        format!("{}/*.swift", &prefix[..idx + 1])
+                    } else {
+                        files.join(",")
+                    }
+                };
+                self.test_files = Some(pattern.clone());
+                format!("Detected {} modified file(s). Scope auto-set to: {}", files.len(), pattern)
+            }
+            _ => "Could not detect modified files.".to_string(),
+        }
+    }
+
+    /// Read the latest stages.json from the most recent test run and update
+    /// the pipeline visualizer state.
+    pub fn refresh_pipeline_status(&mut self) {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, Default)]
+        struct StageEntry {
+            status: String,
+            #[serde(default)]
+            duration: u64,
+            #[serde(default)]
+            coverage: u8,
+        }
+
+        #[derive(Deserialize, Default)]
+        struct StagesJson {
+            #[serde(default)]
+            stages: std::collections::HashMap<String, StageEntry>,
+        }
+
+        // Find the most recent test_* artifacts directory.
+        let artifacts_dir = self.cwd.join("Artifacts");
+        let latest = std::fs::read_dir(&artifacts_dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.file_name().to_string_lossy().starts_with("test_")
+                        && e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                })
+                .max_by_key(|e| e.path())
+                .map(|e| e.path())
+        });
+
+        let stages_file = latest.as_ref().map(|p| p.join("stages.json"));
+        let json_str = stages_file.and_then(|p| std::fs::read_to_string(p).ok());
+
+        let parsed: StagesJson = json_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        // First pass: apply statuses from parsed JSON.
+        for stage in &mut self.pipeline_stages {
+            if let Some(entry) = parsed.stages.get(stage.key) {
+                stage.status = match entry.status.as_str() {
+                    "running" => StageStatus::Running,
+                    "completed" => StageStatus::Completed,
+                    "failed" => StageStatus::Failed,
+                    "skipped" => StageStatus::Skipped,
+                    _ => StageStatus::Pending,
+                };
+                stage.duration = entry.duration;
+                stage.coverage = entry.coverage;
+            }
+        }
+
+        // Second pass: heuristic — if a stage is still Pending and all previous
+        // stages are done, mark it Running.
+        if self.phase == Phase::Test {
+            for idx in 0..self.pipeline_stages.len() {
+                if self.pipeline_stages[idx].status != StageStatus::Pending {
+                    continue;
+                }
+                let prev_all_done = self.pipeline_stages[..idx].iter().all(|s| {
+                    matches!(s.status, StageStatus::Completed | StageStatus::Skipped | StageStatus::Failed)
+                });
+                if prev_all_done {
+                    self.pipeline_stages[idx].status = StageStatus::Running;
+                }
+            }
+        }
+
+        self.pipeline_run_dir = latest;
+    }
+
+    /// Reset all pipeline stages to Pending (called when a new test run starts).
+    fn reset_pipeline_stages(&mut self) {
+        for stage in &mut self.pipeline_stages {
+            stage.status = StageStatus::Pending;
+            stage.duration = 0;
+            stage.coverage = 0;
+        }
+        self.pipeline_run_dir = None;
+    }
+
+    /// Read the latest build_stages.json from the most recent build run and update
+    /// the build pipeline visualizer state.
+    pub fn refresh_build_pipeline_status(&mut self) {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, Default)]
+        struct StageEntry {
+            status: String,
+            #[serde(default)]
+            duration: u64,
+            #[serde(default)]
+            attempt: u8,
+        }
+
+        #[derive(Deserialize, Default)]
+        struct StagesJson {
+            #[serde(default)]
+            stages: std::collections::HashMap<String, StageEntry>,
+        }
+
+        // Find the most recent build_* artifacts directory.
+        let artifacts_dir = self.cwd.join("Artifacts");
+        let latest = std::fs::read_dir(&artifacts_dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.file_name().to_string_lossy().starts_with("build_")
+                        && e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                })
+                .max_by_key(|e| e.path())
+                .map(|e| e.path())
+        });
+
+        let stages_file = latest.as_ref().map(|p| p.join("status").join("build_stages.json"));
+        let json_str = stages_file.and_then(|p| std::fs::read_to_string(p).ok());
+
+        let parsed: StagesJson = json_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        // Map of build stage order for heuristic completion.
+        let _build_order: std::collections::HashMap<&str, usize> =
+            BUILD_STAGES.iter().enumerate().map(|(i, (k, _))| (*k, i)).collect();
+
+        for stage in &mut self.build_stages {
+            if let Some(entry) = parsed.stages.get(stage.key) {
+                stage.status = match entry.status.as_str() {
+                    "running" => StageStatus::Running,
+                    "completed" => StageStatus::Completed,
+                    "failed" => StageStatus::Failed,
+                    "skipped" => StageStatus::Skipped,
+                    _ => StageStatus::Pending,
+                };
+                stage.duration = entry.duration;
+                // Store attempt count in coverage field (repurposed for build).
+                stage.coverage = entry.attempt;
+            }
+        }
+
+        // Heuristic: if stage N is running/completed, all previous stages are completed.
+        for idx in 0..self.build_stages.len() {
+            if matches!(self.build_stages[idx].status, StageStatus::Running | StageStatus::Completed | StageStatus::Failed) {
+                for prev in 0..idx {
+                    if self.build_stages[prev].status == StageStatus::Pending {
+                        self.build_stages[prev].status = StageStatus::Completed;
+                    }
+                }
+            }
+        }
+
+        // Second heuristic: if we're in Build phase and the first stage is still
+        // Pending, mark it Running (BuildAgent hasn't written the file yet).
+        if self.phase == Phase::Build {
+            for idx in 0..self.build_stages.len() {
+                if self.build_stages[idx].status != StageStatus::Pending {
+                    continue;
+                }
+                let prev_all_done = self.build_stages[..idx].iter().all(|s| {
+                    matches!(s.status, StageStatus::Completed | StageStatus::Skipped | StageStatus::Failed)
+                });
+                if prev_all_done {
+                    self.build_stages[idx].status = StageStatus::Running;
+                }
+            }
+        }
+
+        self.build_run_dir = latest;
+    }
+
+    /// Reset all build pipeline stages to Pending (called when a new build run starts).
+    fn reset_build_stages(&mut self) {
+        for stage in &mut self.build_stages {
+            stage.status = StageStatus::Pending;
+            stage.duration = 0;
+            stage.coverage = 0;
+        }
+        self.build_run_dir = None;
     }
 
     fn advance_phase_after_skip(&mut self) {
@@ -720,6 +1078,80 @@ impl App {
                     }
                 }
             }
+            "/coverage" => {
+                let val = parts.next().unwrap_or("");
+                if val.is_empty() {
+                    let current = self.test_coverage.map_or("auto".to_string(), |c| format!("{}%", c));
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Current target coverage: {}. Usage: /coverage <percent>", current),
+                    });
+                } else if let Ok(n) = val.parse::<u8>() {
+                    self.test_coverage = Some(n.min(100));
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Target coverage set to {}%", n.min(100)),
+                    });
+                } else {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Warning,
+                        text: "Invalid coverage value. Use: /coverage <percent>".to_string(),
+                    });
+                }
+            }
+            "/strategy" => {
+                let val = parts.next().unwrap_or("").to_lowercase();
+                if val.is_empty() {
+                    let current = self.test_strategy.as_deref().unwrap_or("default");
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Current strategy: {}. Options: priority, coverage, balanced, happy-only", current),
+                    });
+                } else if ["priority", "coverage", "balanced", "happy-only"].contains(&val.as_str()) {
+                    self.test_strategy = Some(val.clone());
+                    if val == "happy-only" {
+                        self.test_happy_only = true;
+                    } else {
+                        self.test_happy_only = false;
+                    }
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Test strategy set to: {}", val),
+                    });
+                } else {
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Warning,
+                        text: "Invalid strategy. Options: priority, coverage, balanced, happy-only".to_string(),
+                    });
+                }
+            }
+            "/files" => {
+                let val = parts.next().unwrap_or("").to_string();
+                if val.is_empty() {
+                    let current = self.test_files.as_deref().unwrap_or("all");
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Current file scope: {}. Usage: /files <pattern>", current),
+                    });
+                } else {
+                    self.test_files = Some(val.clone());
+                    self.interaction.push(InteractionMessage {
+                        voice: Voice::Agent,
+                        text: format!("Test file scope set to: {}", val),
+                    });
+                }
+            }
+            "/happy-only" => {
+                self.test_happy_only = !self.test_happy_only;
+                if !self.test_happy_only && self.test_strategy.as_deref() == Some("happy-only") {
+                    self.test_strategy = None;
+                }
+                let status = if self.test_happy_only { "enabled" } else { "disabled" };
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Agent,
+                    text: format!("Happy-path-only mode {}", status),
+                });
+            }
             "/skip" => {
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
@@ -768,7 +1200,7 @@ impl App {
             "/help" => {
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
-                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: moonshot, openai, codex, cursor, anthropic, google, ollama, openrouter".to_string(),
+                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /coverage <n>   — set target coverage %\n  /strategy <s>   — set test strategy (priority|coverage|balanced|happy-only)\n  /files <p>      — set test file scope pattern\n  /happy-only     — toggle happy-path-only mode\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: anthropic (default, Claude Fable 5), moonshot, openai, codex, cursor, google, ollama, openrouter".to_string(),
                 });
             }
             "/artifacts" => {
@@ -809,6 +1241,7 @@ impl App {
                         text: "Already running. Use /skip to cancel.".to_string(),
                     });
                 } else {
+                    self.reset_build_stages();
                     self.spawn_request = Some(SpawnRequest::Build);
                     self.phase = Phase::Build;
                     self.agent_state = AgentState::Acting;
@@ -827,6 +1260,7 @@ impl App {
                         text: "Already running. Use /skip to cancel.".to_string(),
                     });
                 } else {
+                    self.reset_pipeline_stages();
                     self.test_stage = None;
                     self.test_resume_from = None;
                     self.spawn_request = Some(SpawnRequest::Test);
@@ -853,6 +1287,7 @@ impl App {
                         text: "Already running. Use /skip to cancel.".to_string(),
                     });
                 } else {
+                    self.reset_pipeline_stages();
                     self.test_stage = None;
                     self.test_resume_from = Some(stage.clone());
                     self.spawn_request = Some(SpawnRequest::Test);
@@ -878,6 +1313,7 @@ impl App {
                         text: "Already running. Use /skip to cancel.".to_string(),
                     });
                 } else {
+                    self.reset_pipeline_stages();
                     self.test_stage = Some(stage.clone());
                     self.test_resume_from = None;
                     self.spawn_request = Some(SpawnRequest::Test);
@@ -892,9 +1328,13 @@ impl App {
             }
             "/status" => {
                 let phase = format!("{:?}", self.phase);
+                let coverage = self.test_coverage.map_or("auto".to_string(), |c| format!("{}%", c));
+                let strategy = self.test_strategy.as_deref().unwrap_or("default");
+                let files = self.test_files.as_deref().unwrap_or("all");
+                let happy = if self.test_happy_only { "yes" } else { "no" };
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
-                    text: format!("Phase: {} | Errors: {} | Provider: {:?} | Model: {:?} | Layout: {:?}", phase, self.error_count, self.current_provider, self.current_model, self.pane_layout),
+                    text: format!("Phase: {} | Errors: {} | Provider: {:?} | Model: {:?} | Layout: {:?}\nTest scope — Coverage: {} | Strategy: {} | Files: {} | Happy-only: {}", phase, self.error_count, self.current_provider, self.current_model, self.pane_layout, coverage, strategy, files, happy),
                 });
             }
             "y" | "yes" => {
@@ -966,10 +1406,18 @@ impl App {
                     content: cmd.to_string(),
                 });
 
+                // Extract the system prompt for providers that support a dedicated flag.
+                let system_prompt = self
+                    .chat_messages
+                    .iter()
+                    .find(|m| m.role == "system")
+                    .map(|m| m.content.clone());
+
                 self.chat_request = Some(ChatRequest {
                     provider,
                     model,
                     messages: self.chat_messages.clone(),
+                    system_prompt,
                 });
                 self.agent_state = AgentState::Thinking;
                 self.interaction.push(InteractionMessage {

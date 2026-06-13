@@ -509,7 +509,8 @@ generate_markdown_flows() {
         type_flows=$(echo "$json" | jq -r ".flows[] | select(.type == \"$flow_type\")")
 
         if [ -n "$type_flows" ]; then
-            echo "## ${flow_type^} Path Flows"
+            local _ft_cap="$(echo "$flow_type" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+            echo "## ${_ft_cap} Path Flows"
             echo ""
 
             echo "$json" | jq -r ".flows[] | select(.type == \"$flow_type\") | \"### \\(.name)\n\n**Feature:** \\(.feature // \"General\")\n\n**Description:** \\(.description // \"No description\")\n\n**Steps:**\n\"" 2>/dev/null

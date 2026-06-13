@@ -4,23 +4,34 @@ use crate::app::PaneLayout;
 
 /// Compute layout rectangles for the UI regions.
 ///
-/// Top: horizontal split based on pane_layout
+/// Top: optional pipeline tracker (1 row) + horizontal split based on pane_layout
 /// Bottom: info line (always) + [panel + extra when expanded] + input bar (always)
 pub fn compute(
     area: Rect,
     pane_layout: PaneLayout,
     bottom_expanded: bool,
-) -> (Rect, Rect, Rect, Option<Rect>, Option<Rect>, Rect) {
+    show_pipeline: bool,
+) -> (Option<Rect>, Rect, Rect, Rect, Option<Rect>, Option<Rect>, Rect) {
+    let pipeline_height = if show_pipeline { 2 } else { 0 };
     let info_height = if bottom_expanded { 3 } else { 1 };
     let bottom_height = info_height + 1; // +1 for input bar
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(bottom_height)])
+        .constraints([
+            Constraint::Length(pipeline_height),
+            Constraint::Min(3),
+            Constraint::Length(bottom_height),
+        ])
         .split(area);
 
-    let top = main_chunks[0];
-    let bottom = main_chunks[1];
+    let pipeline = if show_pipeline {
+        Some(main_chunks[0])
+    } else {
+        None
+    };
+    let top = main_chunks[1];
+    let bottom = main_chunks[2];
 
     let (left_width, right_width) = match pane_layout {
         PaneLayout::Split => (Constraint::Percentage(50), Constraint::Min(0)),
@@ -61,7 +72,7 @@ pub fn compute(
         (None, None)
     };
 
-    (interaction, output, info_line, info_panel, info_extra, input)
+    (pipeline, interaction, output, info_line, info_panel, info_extra, input)
 }
 
 /// Derive the inner (content) size of the output pane for a given terminal
@@ -73,10 +84,11 @@ pub fn output_inner_size(
     term_rows: u16,
     pane_layout: PaneLayout,
     bottom_expanded: bool,
+    show_pipeline: bool,
 ) -> (u16, u16) {
     let area = Rect::new(0, 0, term_cols, term_rows);
-    let (_interaction, output, _info_line, _info_panel, _info_extra, _input) =
-        compute(area, pane_layout, bottom_expanded);
+    let (_pipeline, _interaction, output, _info_line, _info_panel, _info_extra, _input) =
+        compute(area, pane_layout, bottom_expanded, show_pipeline);
     // Subtract the borders (Borders::ALL => 1 cell each side).
     let rows = output.height.saturating_sub(2).max(1);
     let cols = output.width.saturating_sub(2).max(1);

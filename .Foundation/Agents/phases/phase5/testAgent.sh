@@ -109,6 +109,11 @@ STRESS_LEVEL="${STRESS_LEVEL:-1}"  # 1=light, 2=moderate, 3=severe
 # Happy-path-only mode (skip sad/regression/coverage waves)
 HAPPY_ONLY="${HAPPY_ONLY:-false}"
 
+# Unified scope control (orchestrator → TestAgent → sub-agents)
+SCOPE_COVERAGE=""       # Target coverage percentage (e.g., 80)
+SCOPE_STRATEGY=""       # Test strategy: priority, coverage, balanced, happy-only
+SCOPE_FILES=""          # File scope pattern (e.g., "Sources/Models/*.swift")
+
 # Letta Memory integration (set by BuildVerify.sh orchestrator)
 LETTA_MEMORY_AGENT="${LETTA_MEMORY_AGENT:-}"
 LETTA_MEMORY_SCRIPT="${LETTA_MEMORY_SCRIPT:-}"
@@ -119,12 +124,14 @@ STAGES_FILE=""
 CURRENT_STAGE=""
 PIPELINE_START_TIME=""
 
-# Stage results
-declare -A STAGE_RESULTS
-declare -A STAGE_DURATIONS
+# Stage results (bash 3.2-compatible associative-array emulation)
+_stage_result() { local v="STAGE_RESULT_${1}"; echo "${!v:-pending}"; }
+_set_stage_result() { printf -v "STAGE_RESULT_${1}" "%s" "${2}"; }
+_stage_duration() { local v="STAGE_DURATION_${1}"; echo "${!v:-0}"; }
+_set_stage_duration() { printf -v "STAGE_DURATION_${1}" "%s" "${2}"; }
+_stage_coverage() { local v="STAGE_COVERAGE_${1}"; echo "${!v:-0}"; }
+_set_stage_coverage() { printf -v "STAGE_COVERAGE_${1}" "%s" "${2}"; }
 
-# Per-stage coverage tracking (across runs)
-declare -A STAGE_COVERAGE
 PIPELINE_STATE_FILE=""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +147,7 @@ load_pipeline_state() {
         for stage in unit accessibility flow discover ui run maestro argent; do
             local cov
             cov=$(jq -r ".stages.\"$stage\".coverage // 0" "$PIPELINE_STATE_FILE" 2>/dev/null || echo "0")
-            STAGE_COVERAGE[$stage]="$cov"
+            _set_stage_coverage "$stage" "$cov"
         done
     fi
 }
@@ -156,8 +163,8 @@ save_pipeline_state() {
         local first=true
         for stage in unit accessibility flow discover ui run maestro argent; do
             if [ "$first" = true ]; then first=false; else json+=","; fi
-            local cov="${STAGE_COVERAGE[$stage]:-0}"
-            local status="${STAGE_RESULTS[$stage]:-pending}"
+            local cov="$(_stage_coverage "$stage")"
+            local status="$(_stage_result "$stage")"
             json+="\"$stage\":{\"coverage\":$cov,\"last_status\":\"$status\"}"
         done
         json+="}}"
@@ -173,7 +180,7 @@ prompt_skip_stage() {
     if [ ! -t 0 ] || [ "${SKIP_STAGE_PROMPT:-false}" = "true" ] || [ "$YOLO_MODE" = "true" ]; then
         return 1
     fi
-    local current_cov="${STAGE_COVERAGE[$stage]:-0}"
+    local current_cov="$(_stage_coverage "$stage")"
     echo "" >&2
     log_info "Stage: $stage (previous coverage: ${current_cov}%)"
     log_info "Press 's' NOW to skip, or press 's' at any time during the stage to abort"
@@ -215,7 +222,7 @@ run_stage_with_skip() {
         return $?
     fi
 
-    local current_cov="${STAGE_COVERAGE[$stage]:-0}"
+    local current_cov="$(_stage_coverage "$stage")"
     echo "" >&2
     log_info "Stage: $stage (previous coverage: ${current_cov}%)"
     echo -e "\033[2m  → Press 's' at any time to skip this stage\033[0m" >&2
@@ -296,6 +303,10 @@ OPTIONS:
     --skip-run              Skip test execution
     --skip-maestro          Skip Maestro UI flow verification
     --skip-argent           Skip Argent runtime verification
+    --coverage <n>          Target coverage percentage for unit tests
+    --strategy <mode>       Test strategy: priority, coverage, balanced, happy-only
+    --files <pattern>       Scope to specific files (glob or comma-separated)
+    --happy-only            Only run happy-path tests across all stages
     --verbose               Enable verbose output
     --dry-run               Show what would be done without executing
 
@@ -412,14 +423,14 @@ store_test_results() {
     "scheme": "${SCHEME:-unknown}",
     "timestamp": "$timestamp",
     "stages": {
-        "unit": "${STAGE_RESULTS[unit]:-skipped}",
-        "accessibility": "${STAGE_RESULTS[accessibility]:-skipped}",
-        "flow": "${STAGE_RESULTS[flow]:-skipped}",
-        "discover": "${STAGE_RESULTS[discover]:-skipped}",
-        "ui": "${STAGE_RESULTS[ui]:-skipped}",
-        "run": "${STAGE_RESULTS[run]:-skipped}",
-        "maestro": "${STAGE_RESULTS[maestro]:-skipped}",
-        "argent": "${STAGE_RESULTS[argent]:-skipped}"
+        "unit": "$(_stage_result "unit")",
+        "accessibility": "$(_stage_result "accessibility")",
+        "flow": "$(_stage_result "flow")",
+        "discover": "$(_stage_result "discover")",
+        "ui": "$(_stage_result "ui")",
+        "run": "$(_stage_result "run")",
+        "maestro": "$(_stage_result "maestro")",
+        "argent": "$(_stage_result "argent")"
     }
 }
 EOF
@@ -445,6 +456,19 @@ parse_arguments() {
         case "$1" in
             --project)
                 PROJECT_PATH="${2:-}"
+                # Translate to XCODE_PROJECT/XCODE_WORKSPACE so build_common_args forwards it.
+                if [ -n "$PROJECT_PATH" ]; then
+                    if echo "$PROJECT_PATH" | grep -q '\.xcworkspace$'; then
+                        XCODE_WORKSPACE="$PROJECT_PATH"
+                        XCODE_PROJECT=""
+                    elif echo "$PROJECT_PATH" | grep -q '\.xcodeproj$'; then
+                        XCODE_PROJECT="$PROJECT_PATH"
+                        XCODE_WORKSPACE=""
+                    else
+                        # Fallback: treat as project path and let sub-agents handle it
+                        XCODE_PROJECT="$PROJECT_PATH"
+                    fi
+                fi
                 shift 2
                 ;;
             --scheme)
@@ -558,6 +582,18 @@ parse_arguments() {
                 HAPPY_ONLY="true"
                 shift 1
                 ;;
+            --coverage)
+                SCOPE_COVERAGE="${2:-}"
+                shift 2
+                ;;
+            --strategy)
+                SCOPE_STRATEGY="${2:-}"
+                shift 2
+                ;;
+            --files)
+                SCOPE_FILES="${2:-}"
+                shift 2
+                ;;
             --help|-h)
                 show_usage
                 exit 0
@@ -571,6 +607,51 @@ parse_arguments() {
     done
 }
 
+# Load build scope from the most recent BuildAgent artifact.
+# If --files was not explicitly set, use .build_scope.json as default.
+load_build_scope() {
+    if [ -n "$SCOPE_FILES" ]; then
+        return
+    fi
+    local latest_build=""
+    for dir in "$ARTIFACTS_DIR"/build_*; do
+        [ -d "$dir" ] || continue
+        if [ -z "$latest_build" ] || [ "$dir" -nt "$latest_build" ]; then
+            latest_build="$dir"
+        fi
+    done
+    if [ -z "$latest_build" ]; then
+        return
+    fi
+    local scope_file="$latest_build/.build_scope.json"
+    if [ -f "$scope_file" ] && command -v jq >/dev/null 2>&1; then
+        local files
+        files=$(jq -r '.modified_files | join(",")' "$scope_file" 2>/dev/null || echo "")
+        if [ -n "$files" ]; then
+            # Filter out garbage files (logs, artifacts, system files).
+            local filtered=""
+            local IFS=','
+            for f in $files; do
+                case "$f" in
+                    Artifacts/*|.git/*|node_modules/*|Pods/*|.build/*|DerivedData/*)
+                        continue ;;
+                    *.DS_Store*|*.log|*.tmp|*.bak)
+                        continue ;;
+                esac
+                if [ -n "$filtered" ]; then
+                    filtered="$filtered,$f"
+                else
+                    filtered="$f"
+                fi
+            done
+            if [ -n "$filtered" ]; then
+                SCOPE_FILES="$filtered"
+                log_info "Loaded build scope from $scope_file: $filtered"
+            fi
+        fi
+    fi
+}
+
 initialize() {
     log_section "════════════════════════════════════════════════════════"
     log_section "Test Agent - Complete Test Automation Pipeline"
@@ -578,6 +659,9 @@ initialize() {
     echo "" >&2
 
     PIPELINE_START_TIME=$(date +%s)
+
+    # Auto-load file scope from last BuildAgent run.
+    load_build_scope
 
     # Setup directories
     setup_logs_dir "$ARTIFACTS_DIR" || {
@@ -642,10 +726,10 @@ update_stage_status() {
     local details="${4:-}"
     local coverage="${5:-0}"
 
-    STAGE_RESULTS[$stage]="$status"
-    STAGE_DURATIONS[$stage]="$duration"
+    _set_stage_result "$stage" "$status"
+    _set_stage_duration "$stage" "$duration"
     if [ "$coverage" -gt 0 ]; then
-        STAGE_COVERAGE[$stage]="$coverage"
+        _set_stage_coverage "$stage" "$coverage"
     fi
 
     if command -v jq >/dev/null 2>&1; then
@@ -871,39 +955,61 @@ build_common_args() {
         args="$args --project \"$XCODE_PROJECT\""
     fi
     args="$args --artifacts-dir \"${ARTIFACTS_RUN_DIR}\""
-    [ "$YOLO_MODE" = "true" ] && args="$args --yolo"
     [ "$VERBOSE" = "true" ] && args="$args --verbose"
     [ "$DRY_RUN" = "true" ] && args="$args --dry-run"
     echo "$args"
 }
 
-# Args for agents that support --scheme and --ai-provider
+# Args for unit test agent (supports coverage, strategy, files, happy-only)
 build_unit_test_args() {
     local args=$(build_common_args)
     [ -n "$SCHEME" ] && args="$args --scheme \"$SCHEME\""
     args="$args --ai-provider \"$AI_PROVIDER\""
+    [ "$YOLO_MODE" = "true" ] && args="$args --yolo"
     [ "$HAPPY_ONLY" = "true" ] && args="$args --happy-only"
+    [ -n "$SCOPE_COVERAGE" ] && args="$args --target-coverage \"$SCOPE_COVERAGE\""
+    [ -n "$SCOPE_STRATEGY" ] && args="$args --test-strategy \"$SCOPE_STRATEGY\""
+    [ -n "$SCOPE_FILES" ] && args="$args --files \"$SCOPE_FILES\""
     [ -n "$SIMULATOR_NAME" ] && args="$args --simulator-name \"$SIMULATOR_NAME\""
     echo "$args"
 }
 
-# Args for accessibility agent (no --happy-only)
+# Args for accessibility agent (supports files)
 build_accessibility_args() {
     local args=$(build_common_args)
     [ -n "$SCHEME" ] && args="$args --scheme \"$SCHEME\""
     args="$args --ai-provider \"$AI_PROVIDER\""
+    [ "$YOLO_MODE" = "true" ] && args="$args --yolo"
+    [ -n "$SCOPE_FILES" ] && args="$args --files \"$SCOPE_FILES\""
     [ -n "$SIMULATOR_NAME" ] && args="$args --simulator-name \"$SIMULATOR_NAME\""
     echo "$args"
 }
 
-# Args for flow agent (no --scheme, no --happy-only)
+# Args for flow agent (no --scheme, no --happy-only, no --project)
 build_flow_args() {
-    local args=$(build_common_args)
+    local args=""
     args="$args --ai-provider \"$AI_PROVIDER\""
+    args="$args --artifacts-dir \"${ARTIFACTS_RUN_DIR}\""
+    [ "$VERBOSE" = "true" ] && args="$args --verbose"
+    [ "$DRY_RUN" = "true" ] && args="$args --dry-run"
     echo "$args"
 }
 
-# Args for test runner (no --ai-provider, no --happy-only)
+# Args for UI test agent (uses flows, supports yolo)
+build_ui_test_args() {
+    # uiTestAgent.sh does NOT support --project or --scheme.
+    local args=""
+    args="$args --ai-provider \"$AI_PROVIDER\""
+    args="$args --artifacts-dir \"${ARTIFACTS_RUN_DIR}\""
+    [ "$YOLO_MODE" = "true" ] && args="$args --yolo"
+    [ "$HAPPY_ONLY" = "true" ] && args="$args --type happy"
+    [ -n "$SIMULATOR_NAME" ] && args="$args --simulator-name \"$SIMULATOR_NAME\""
+    [ "$VERBOSE" = "true" ] && args="$args --verbose"
+    [ "$DRY_RUN" = "true" ] && args="$args --dry-run"
+    echo "$args"
+}
+
+# Args for test runner (no ai-provider, no happy-only, no files, no yolo)
 build_test_runner_args() {
     local args=$(build_common_args)
     [ -n "$SCHEME" ] && args="$args --scheme \"$SCHEME\""
@@ -1260,8 +1366,9 @@ run_stage_ui() {
     local start_time
     start_time=$(date +%s)
     local args
-    args=$(build_agent_args)
+    args=$(build_ui_test_args)
     args="$args --flows \"$flows_file\""
+
 
     if [ "$DRY_RUN" = "true" ]; then
         log_info "[DRY RUN] Would run: $UI_TEST_AGENT $args"
@@ -1644,23 +1751,26 @@ run_stage_report() {
     # Build stage summary
     local stage_rows=""
     for stage in unit accessibility flow discover ui run maestro argent; do
-        local status="${STAGE_RESULTS[$stage]:-pending}"
-        local duration="${STAGE_DURATIONS[$stage]:-0}"
+        local status="$(_stage_result "$stage")"
+        local duration="$(_stage_duration "$stage")"
         local status_class="warning"
         case "$status" in
             completed) status_class="success" ;;
             failed) status_class="failure" ;;
             skipped) status_class="warning" ;;
         esac
-        stage_rows+="<tr><td>${stage^}</td><td class='$status_class'>${status^}</td><td>${duration}s</td></tr>"
+        local _stage_cap="$(echo "$stage" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+        local _status_cap="$(echo "$status" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+        stage_rows+="<tr><td>${_stage_cap}</td><td class='$status_class'>${_status_cap}</td><td>${duration}s</td></tr>"
     done
 
     # Count successes/failures
     local completed=0
     local failed=0
     local skipped=0
-    for status in "${STAGE_RESULTS[@]}"; do
-        case "$status" in
+    for _st in unit accessibility flow discover ui run maestro argent; do
+        local _status="$(_stage_result "$_st")"
+        case "$_status" in
             completed) completed=$((completed + 1)) ;;
             failed) failed=$((failed + 1)) ;;
             skipped) skipped=$((skipped + 1)) ;;
@@ -1914,8 +2024,8 @@ main() {
     # Print summary
     log_info "Stage Summary:"
     for stage in unit accessibility flow discover ui run maestro argent report; do
-        local status="${STAGE_RESULTS[$stage]:-pending}"
-        local duration="${STAGE_DURATIONS[$stage]:-0}"
+        local status="$(_stage_result "$stage")"
+        local duration="$(_stage_duration "$stage")"
         case "$status" in
             completed) echo -e "  ${GREEN}✓${NC} ${stage}: ${duration}s" >&2 ;;
             failed) echo -e "  ${RED}✗${NC} ${stage}: ${duration}s" >&2 ;;

@@ -48,6 +48,7 @@ LOG_PREFIX="[UNIT-TEST]"
 PROJECT_PATH=""
 SCHEME=""
 FILES_PATTERN=""
+UNIT_TEST_CONTEXT_PATHS=()
 FRAMEWORK="${FRAMEWORK:-xctest}"  # xctest or swift-testing
 TARGET_COVERAGE="${TARGET_COVERAGE:-80}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -596,9 +597,11 @@ discover_available_providers() {
     if command -v cursor-agent >/dev/null 2>&1 || command -v cursor >/dev/null 2>&1; then providers+=("cursor"); fi
     if command -v codex >/dev/null 2>&1 || command -v openai >/dev/null 2>&1; then providers+=("codex"); fi
     if command -v gemini >/dev/null 2>&1; then providers+=("gemini"); fi
-    if command -v claude >/dev/null 2>&1; then providers+=("claude"); fi
+    # Claude temporarily removed from rotation (user paused account).
     if command -v aider >/dev/null 2>&1; then providers+=("aider"); fi
-    printf '%s\n' "${providers[@]}"
+    if [ ${#providers[@]} -gt 0 ]; then
+        printf '%s\n' "${providers[@]}"
+    fi
 }
 
 # Maximum concurrent jobs per provider (to avoid rate limits)
@@ -608,7 +611,7 @@ get_provider_max_slots() {
         cursor) echo 3 ;;
         codex) echo 3 ;;
         gemini) echo 3 ;;
-        claude) echo 2 ;;
+        # Claude temporarily removed from rotation (user paused account).
         aider) echo 2 ;;
         *) echo 2 ;;
     esac
@@ -644,7 +647,7 @@ generate_tests_parallel() {
     local providers=()
     while IFS= read -r p; do [ -n "$p" ] && providers+=("$p"); done <<< "$(discover_available_providers)"
     if [ ${#providers[@]} -eq 0 ]; then
-        log_error "No AI providers found. Install at least one: cursor, codex, gemini, kimi, claude, aider"
+        log_error "No AI providers found. Install at least one: cursor, codex, gemini, kimi, aider"
         return 12
     fi
 
@@ -1294,8 +1297,8 @@ main() {
     # Gather context once, cache across runs
     local test_context
     local cache_key
-    cache_key=$(compute_context_key "unit-test-agent" "${UNIT_TEST_CONTEXT_PATHS[@]}")
-    test_context=$(gather_test_context --cache-key "$cache_key" "${UNIT_TEST_CONTEXT_PATHS[@]}")
+    cache_key=$(compute_context_key "unit-test-agent" "${UNIT_TEST_CONTEXT_PATHS[@]+"${UNIT_TEST_CONTEXT_PATHS[@]}"}")
+    test_context=$(gather_test_context --cache-key "$cache_key" "${UNIT_TEST_CONTEXT_PATHS[@]+"${UNIT_TEST_CONTEXT_PATHS[@]}"}")
 
     # Force priority strategy in happy-only mode (so we only run happy wave)
     if [ "$HAPPY_ONLY" = "true" ]; then

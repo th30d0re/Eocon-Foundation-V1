@@ -237,7 +237,7 @@ compute_context_key() {
     local paths=("$@")
     local key_input=""
 
-    for p in "${paths[@]}"; do
+    for p in "${paths[@]+"${paths[@]}"}"; do
         key_input+="${p}:"
     done
     key_input+="|${settings}"
@@ -283,7 +283,7 @@ save_context_cache() {
     # Write manifest: type|path|mtime|size
     local manifest="${CONTEXT_CACHE_DIR}/manifest.txt"
     > "$manifest"
-    for p in "${paths[@]}"; do
+    for p in "${paths[@]+"${paths[@]}"}"; do
         if [ -f "$p" ]; then
             local mtime size
             mtime=$(stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo "0")
@@ -1039,6 +1039,28 @@ EOF
 # Returns: Sets LOGS_DIR global variable
 setup_logs_dir() {
     local base_dir="${1:-${ARTIFACTS_DIR:-./Artifacts}}"
+
+    # If the base directory already looks like a timestamped run directory
+    # (e.g., Artifacts/test_20260605_121738 or Artifacts/build_20260605_121738),
+    # reuse it directly instead of creating a nested directory.
+    if echo "$base_dir" | grep -qE '/(test_|build_)[0-9]{8}_[0-9]{6}$'; then
+        LOGS_DIR="${base_dir}/logs"
+        STATUS_DIR="${base_dir}/status"
+        ARTIFACTS_RUN_DIR="$base_dir"
+        if ! mkdir -p "$LOGS_DIR"; then
+            log_error "Failed to create logs directory: $LOGS_DIR"
+            return 1
+        fi
+        if ! mkdir -p "$STATUS_DIR"; then
+            log_error "Failed to create status directory: $STATUS_DIR"
+            return 1
+        fi
+        log_verbose "Reusing run directory: $ARTIFACTS_RUN_DIR"
+        log_verbose "Logs directory: $LOGS_DIR"
+        log_verbose "Status directory: $STATUS_DIR"
+        return 0
+    fi
+
     local run_id
     run_id="$(date +%Y%m%d_%H%M%S)"
 

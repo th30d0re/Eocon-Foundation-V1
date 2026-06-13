@@ -25,7 +25,7 @@ if [ "$AI_ENV_LOADED" -eq 0 ]; then
     export AI_ENV_LOADED=1
 fi
 
-AI_PROVIDER_DEFAULT="${AI_PROVIDER:-copilot}"
+AI_PROVIDER_DEFAULT="${AI_PROVIDER:-anthropic}"
 AI_PROVIDER_DEFAULT="$(echo "$AI_PROVIDER_DEFAULT" | tr '[:upper:]' '[:lower:]')"
 
 AI_PROVIDER_READY=${AI_PROVIDER_READY:-0}
@@ -54,7 +54,7 @@ _ai_provider_default_model() {
         openai)
             echo "${OPENAI_MODEL:-gpt-5-codex}" ;;
         anthropic)
-            echo "${ANTHROPIC_MODEL:-claude-4.5-sonnet}" ;;
+            echo "${ANTHROPIC_MODEL:-claude-fable-5}" ;;
         google)
             echo "${GOOGLE_MODEL:-gemini-1.5-pro-latest}" ;;
         deepseek)

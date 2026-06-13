@@ -14,6 +14,8 @@ pub struct ChatRequest {
     pub provider: String,
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    /// Optional system prompt loaded from `orchestrate.md`.
+    pub system_prompt: Option<String>,
 }
 
 /// Spawn a background thread that runs the provider's CLI and returns the
@@ -28,7 +30,7 @@ pub fn spawn_chat_request(req: ChatRequest) -> Receiver<Result<String, String>> 
 }
 
 fn run_cli_chat(req: ChatRequest) -> Result<String, String> {
-    let cfg = build_cli_config(&req.provider, &req.model).ok_or_else(|| {
+    let cfg = build_cli_config(&req).ok_or_else(|| {
         format!(
             "No CLI tool found for provider '{}'. \
              Available mappings:\n\
@@ -164,13 +166,20 @@ struct CliConfig {
 }
 
 /// Map a provider name to the CLI program and arguments.
-fn build_cli_config(provider: &str, _model: &str) -> Option<CliConfig> {
+fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
+    let provider = req.provider.as_str();
+    let model = req.model.as_str();
     match provider {
         "anthropic" => {
             let exe = find_exe("claude", &["/opt/homebrew/bin/claude"])?;
+            let mut args = vec!["-p".into(), "--model".into(), model.into()];
+            if let Some(ref system) = req.system_prompt {
+                args.push("--system-prompt".into());
+                args.push(system.clone());
+            }
             Some(CliConfig {
                 program: exe,
-                args: vec!["-p".into()],
+                args,
                 prompt_via_arg: false,
                 output_file: None,
             })
@@ -227,7 +236,7 @@ fn build_cli_config(provider: &str, _model: &str) -> Option<CliConfig> {
             ])?;
             Some(CliConfig {
                 program: exe,
-                args: vec!["run".into(), _model.into()],
+                args: vec!["run".into(), model.into()],
                 prompt_via_arg: false,
                 output_file: None,
             })
@@ -308,6 +317,10 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// Build the system prompt for the Foundation Orchestrator context.
+///
+/// Loads the canonical `orchestrate.md` prompt from the Foundation agents tree
+/// (`Agents/orchestrators/orchestrate.md`, relative to the phase5 agents dir),
+/// strips YAML front matter, and prefixes dynamic runtime context.
 pub fn build_system_prompt(
     provider: &str,
     model: &str,
@@ -317,30 +330,102 @@ pub fn build_system_prompt(
     let agents = agents_dir.display().to_string();
     let cwd = cwd.display().to_string();
 
-    format!(
-        "You are the Foundation Orchestrator, an AI assistant embedded in a Rust TUI \
-         application that manages iOS/macOS build and test pipelines.\n\n\
-         Your purpose is to help the user understand, debug, and modify the Foundation \
-         harness — a set of shell scripts and tools that automate building and testing \
-         iOS/macOS apps using AI agents.\n\n\
-         You can help with:\n\
-         - Understanding the orchestrator and agent architecture\n\
-         - Debugging build failures and test failures\n\
-         - Suggesting code changes to the harness (the user applies them manually)\n\
-         - Explaining available commands and workflows\n\n\
-         Available orchestrator commands:\n\
-         - /build — start the BuildAgent\n\
-         - /test — start the TestAgent\n\
-         - /provider <name> — switch AI provider\n\
-         - /model <name> — switch AI model\n\
-         - /help — show available commands\n\n\
-         Current configuration:\n\
+    // Canonical location: Agents/orchestrators/orchestrate.md
+    let orchestrate_path = agents_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("orchestrators").join("orchestrate.md"))
+        .filter(|p| p.is_file());
+
+    let orchestrate_body = orchestrate_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| strip_front_matter(&s))
+        .unwrap_or_default();
+
+    let runtime_context = format!(
+        "You are the Foundation Orchestrator, operating inside the Rust TUI orchestrator.\n\
+         You are Claude Fable 5: long-horizon, autonomous, and in charge of the agent swarm.\n\n\
+         Current runtime context:\n\
          - Provider: {}\n\
          - Model: {}\n\
          - Agents directory: {}\n\
-         - Working directory: {}\n\n\
-         Respond concisely and helpfully. If you suggest code changes, wrap them in \
-         markdown code blocks with the file path.",
+         - Working directory: {}\n\n",
         provider, model, agents, cwd
-    )
+    );
+
+    if orchestrate_body.is_empty() {
+        runtime_context + "\nNo orchestrate.md prompt was found. Use the built-in Foundation \
+        knowledge to assist the user, and consider creating/updating orchestrate.md so future \
+        sessions inherit a richer prompt."
+    } else {
+        runtime_context + &orchestrate_body
+    }
+}
+
+/// Strip a leading YAML front-matter block (`--- ... ---`) from markdown content.
+fn strip_front_matter(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("---") {
+        return text.to_string();
+    }
+    let rest = &trimmed[3..];
+    if let Some(end) = rest.find("\n---") {
+        let after = &rest[end + 4..];
+        return after.trim_start().to_string();
+    }
+    text.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn strip_front_matter_removes_yaml_header() {
+        let input = "---\nname: foo\ndescription: bar\n---\n# Heading\nbody";
+        let result = strip_front_matter(input);
+        assert_eq!(result, "# Heading\nbody");
+    }
+
+    #[test]
+    fn strip_front_matter_no_op_without_header() {
+        let input = "# Heading\nbody";
+        let result = strip_front_matter(input);
+        assert_eq!(result, "# Heading\nbody");
+    }
+
+    #[test]
+    fn build_system_prompt_loads_orchestrate_md() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents_dir = temp.path().join("phases").join("phase5");
+        let orchestrators_dir = temp.path().join("orchestrators");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::create_dir_all(&orchestrators_dir).unwrap();
+
+        let orchestrate_md = orchestrators_dir.join("orchestrate.md");
+        let mut f = std::fs::File::create(&orchestrate_md).unwrap();
+        write!(
+            f,
+            "---\nname: test-orchestrator\n---\n# Test Orchestrator\nYou are in charge."
+        )
+        .unwrap();
+
+        let prompt = build_system_prompt("anthropic", "claude-fable-5", &agents_dir, temp.path());
+        assert!(prompt.contains("Claude Fable 5"));
+        assert!(prompt.contains("You are in charge."));
+        assert!(!prompt.contains("name: test-orchestrator"));
+    }
+
+    #[test]
+    fn build_system_prompt_falls_back_when_orchestrate_md_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents_dir = temp.path().join("phases").join("phase5");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        let prompt = build_system_prompt("anthropic", "claude-fable-5", &agents_dir, temp.path());
+        assert!(prompt.contains("Claude Fable 5"));
+        assert!(prompt.contains("No orchestrate.md prompt was found"));
+    }
 }
