@@ -102,7 +102,7 @@ run_ai_cli() {
             fi
             ;;
 
-        claude)
+        claude|anthropic)
             # Claude CLI - pipe from file to avoid escaping issues
             ai_cmd_full="cat \"$prompt_file\" | $AI_CMD --dangerously-skip-permissions -p -"
             log_verbose "Running Claude CLI (with --dangerously-skip-permissions)"

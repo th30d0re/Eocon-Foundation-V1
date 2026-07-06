@@ -637,6 +637,7 @@ $context"
             TIMEOUT_RETRY_COUNT=0
             update_session_context "$CURRENT_ATTEMPT" "success" "Build passed"
             write_success_status
+            write_build_guide
             update_sidebar_stage "Complete"
             write_build_stage "complete" "completed"
             return 0
@@ -819,6 +820,7 @@ Please re-examine the relevant views and ensure every listed element has the cor
             # Record context outcome for VOI learning
             record_context_outcome "$had_context" "$CURRENT_ATTEMPT"
             write_success_status
+            write_build_guide
             return 0
         fi
 
@@ -1104,6 +1106,7 @@ run_single_build_loop() {
                     TIMEOUT_RETRY_COUNT=0
                     update_session_context "0" "success" "Build passed — no prompt to implement"
                     write_success_status
+                    write_build_guide
                     return 0
                 fi
 
@@ -1113,6 +1116,7 @@ run_single_build_loop() {
                     TIMEOUT_RETRY_COUNT=0
                     update_session_context "0" "success" "Build passed, prompt already completed"
                     write_success_status
+                    write_build_guide
                     return 0
                 fi
 
@@ -1163,6 +1167,10 @@ run_single_build_loop() {
             # Follow-up: classify error pattern and select best repair strategy
             error_pattern=$(classify_error_pattern "$error_feedback")
             current_strategy=$(select_repair_strategy "$error_pattern")
+            
+            export ACCUMULATED_ERRORS="${ACCUMULATED_ERRORS:-}${ACCUMULATED_ERRORS:+, }$error_pattern"
+            export ACCUMULATED_STRATEGIES="${ACCUMULATED_STRATEGIES:-}${ACCUMULATED_STRATEGIES:+, }$current_strategy"
+            
             log_info "Error pattern: $error_pattern | Strategy: $current_strategy"
             prompt=$(build_followup_prompt_with_strategy "$error_feedback" "$CURRENT_ATTEMPT" "$input_content" "$context" "$current_strategy")
         fi
@@ -1265,6 +1273,7 @@ run_single_build_loop() {
                 log_info "Prompt completion saved to state (hash: $prompt_hash)"
             fi
             write_success_status
+            write_build_guide
             return 0
         fi
 

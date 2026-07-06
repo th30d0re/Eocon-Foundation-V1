@@ -347,7 +347,7 @@ detect_ai_provider() {
             fi
             ;;
 
-        claude)
+        claude|anthropic)
             if command -v claude >/dev/null 2>&1; then
                 AI_CMD="claude"
                 log_info "Using Claude CLI (with --dangerously-skip-permissions)"
@@ -628,7 +628,7 @@ check_auth_error() {
                     echo "  2. Or set: export CURSOR_API_KEY=<your_api_key>" >&2
                     echo "     (get key from: https://cursor.com/settings → API Keys)" >&2
                     ;;
-                claude)
+                claude|anthropic)
                     log_info "To authenticate Claude CLI:"
                     echo "  1. Get your API key from: https://console.anthropic.com/" >&2
                     echo "  2. Set environment variable: export ANTHROPIC_API_KEY=your_key" >&2

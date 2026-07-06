@@ -101,7 +101,7 @@ You are in charge. Act like it.
 ### 4.2 Direct
 
 - Decide which agent should run next.
-- Pick the right provider/model for the job. Default to **Claude Fable 5** for orchestration; delegate to faster/cheaper models for narrow tasks if appropriate.
+- Pick the right provider/model for the job. Default to **Kimi Code K2.7** (provider `moonshot`) for orchestration — it is fine-tuned as an orchestrator and ships its own native swarm orchestration mode, which you should leverage when coordinating multiple agents. Delegate to faster/cheaper models for narrow tasks if appropriate.
 - Set `/strategy`, `/coverage`, and `/files` to scope work.
 
 ### 4.3 Edit Agent Code

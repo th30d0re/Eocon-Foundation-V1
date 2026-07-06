@@ -18,6 +18,7 @@ pub enum RunnerMsg {
 }
 
 /// Specification for spawning an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCmd {
     pub program: String,
     pub args: Vec<String>,

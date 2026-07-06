@@ -233,6 +233,60 @@ EOF
     fi
 }
 
+write_build_guide() {
+    if [ "${BUILD_GUIDES:-1}" = "0" ] || [ "$DRY_RUN" = "true" ]; then
+        return 0
+    fi
+
+    local guides_dir="${PROJECT_ROOT:-.}/Guides"
+    mkdir -p "$guides_dir"
+
+    local timestamp
+    timestamp=$(date -u +"%Y%m%d_%H%M%S")
+    local guide_file="${guides_dir}/build_${timestamp}.md"
+
+    # Extract first ~30 lines of prompt/plan
+    local input_summary=""
+    if [ -n "${PROMPT_CONTENT:-}" ]; then
+        input_summary=$(echo "$PROMPT_CONTENT" | head -n 30)
+    elif type get_input_content &>/dev/null; then
+        input_summary=$(get_input_content | head -n 30)
+    fi
+
+    local strategies="${ACCUMULATED_STRATEGIES:-None recorded}"
+    local errors="${ACCUMULATED_ERRORS:-None recorded}"
+
+    cat > "$guide_file" << EOF
+# Build Agent Implementation Guide
+**Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+## What was implemented
+\`\`\`text
+$input_summary
+\`\`\`
+
+## How
+- **Provider:** ${AI_PROVIDER:-unknown}
+- **Model:** ${AI_MODEL:-unknown}
+- **Total Attempts Used:** ${CURRENT_ATTEMPT:-0}
+
+## Decisions made and rationale
+- **Repair Strategies Applied:** $strategies
+
+## Challenges
+- **Error Patterns Encountered:** $errors
+
+## Solutions applied
+(Solutions implemented by the build agent based on the repair strategies above)
+
+## Lessons learned
+- **Status:** $([ "${CURRENT_ATTEMPT:-0}" -lt "${MAX_REPAIR_ATTEMPTS:-3}" ] && echo "Passed" || echo "Failed")
+- **Pass/Fail Counts:** Attempts: ${CURRENT_ATTEMPT:-0}
+EOF
+
+    log_success "Build guide written to: $guide_file"
+}
+
 write_human_intervention() {
     local status_file="${STATUS_DIR}/human_intervention.md"
     local all_errors=""

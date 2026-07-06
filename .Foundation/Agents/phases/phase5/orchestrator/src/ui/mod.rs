@@ -193,6 +193,52 @@ mod tests {
     }
 
     #[test]
+    fn foundation_pipeline_tracker_renders_when_pipeline_active() {
+        use crate::pipeline_engine::{PhaseState, PhaseStatus, PipelineRunState};
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(false);
+        app.pipeline_state = Some(PipelineRunState {
+            schema_version: 1,
+            current_phase: Some(2),
+            started_at: None,
+            finished_at: None,
+            phases: (0..=5)
+                .map(|idx| {
+                    let status = if idx < 2 {
+                        PhaseStatus::Succeeded
+                    } else if idx == 2 {
+                        PhaseStatus::AwaitingApproval
+                    } else {
+                        PhaseStatus::Pending
+                    };
+                    PhaseState {
+                        phase: idx as u32,
+                        status,
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+        });
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row0: String = (0..120)
+            .map(|col| buf[(col, 0)].symbol().to_string())
+            .collect();
+        assert!(row0.contains("Foundation Pipeline"), "title missing: {}", row0.trim());
+
+        let row1: String = (0..120)
+            .map(|col| buf[(col, 1)].symbol().to_string())
+            .collect();
+        assert!(row1.contains("Constitution"), "content missing: {}", row1.trim());
+        assert!(row1.contains("Planner"), "content missing: {}", row1.trim());
+        assert!(row1.contains("Question"), "content missing: {}", row1.trim());
+    }
+
+    #[test]
     fn typing_does_not_panic() {
         use crate::action::Action;
 

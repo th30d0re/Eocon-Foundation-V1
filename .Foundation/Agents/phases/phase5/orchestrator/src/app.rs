@@ -8,6 +8,12 @@ use crate::action::Action;
 use crate::apply::{apply_changes, PendingChange};
 use crate::chat::{build_system_prompt, ChatMessage, ChatRequest};
 use crate::mock;
+use crate::pipeline_engine::{
+    approve_phase, apply_phase_outcome, awaiting_approval_phase, can_start_phase,
+    find_latest_result_json, format_status_summary, map_exit_code, parse_result_json,
+    pipeline_state_path, reject_phase, save_pipeline_state, skip_phase, start_phase,
+    PipelineRunState,
+};
 use crate::pty_screen::PtyScreen;
 use crate::ui::theme::Voice;
 
@@ -58,6 +64,23 @@ pub enum ApplyPhase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnRequest {
+    Build,
+    Test,
+}
+
+/// What kind of agent is currently running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveAgentKind {
+    #[default]
+    None,
+    Build,
+    Test,
+    PipelinePhase(usize),
+}
+
+/// Sub-step tracking for pipeline phase 5 (BuildAgent -> TestAgent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase5Step {
     Build,
     Test,
 }
@@ -141,6 +164,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "/files", description: "Set test file scope pattern", takes_arg: true, arg_hint: "<pattern>" },
     SlashCommand { name: "/happy-only", description: "Toggle happy-path-only mode", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/skip", description: "Skip current phase", takes_arg: false, arg_hint: "" },
+    SlashCommand { name: "/pipeline", description: "Run or inspect the full Foundation pipeline", takes_arg: true, arg_hint: "[status]" },
+    SlashCommand { name: "/phase", description: "Run a single pipeline phase", takes_arg: true, arg_hint: "<n> [--force]" },
+    SlashCommand { name: "/approve", description: "Approve an awaiting-approval gate", takes_arg: false, arg_hint: "" },
+    SlashCommand { name: "/reject", description: "Reject an awaiting-approval gate", takes_arg: false, arg_hint: "" },
+    SlashCommand { name: "/skip-phase", description: "Skip a pipeline phase", takes_arg: true, arg_hint: "<n>" },
     SlashCommand { name: "/status", description: "Show current status", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/info", description: "Toggle info panel view", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/metrics", description: "Show metrics view", takes_arg: false, arg_hint: "" },
@@ -153,7 +181,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
 
 /// Available AI providers and their models.
 pub const PROVIDERS: &[(&str, &[&str])] = &[
-    ("moonshot", &["kimi-k2.6"]),
+    ("moonshot", &["kimi-k2.7", "kimi-k2.6"]),
     ("openai", &["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview", "o1-mini"]),
     ("codex", &["o3", "o4-mini", "gpt-5.5"]),
     ("cursor", &["cursor-small", "cursor-large"]),
@@ -231,6 +259,20 @@ pub struct App {
     pub build_stages: Vec<PipelineStage>,
     /// Directory of the current build run (where build_stages.json lives).
     pub build_run_dir: Option<PathBuf>,
+    /// Foundation project root detected from cwd.
+    pub project_dir: PathBuf,
+    /// Currently running agent kind (for dispatching AgentExited).
+    pub active_agent: ActiveAgentKind,
+    /// Full 0-5 pipeline state.
+    pub pipeline_state: Option<PipelineRunState>,
+    /// Whether the full pipeline is currently auto-running.
+    pub pipeline_running: bool,
+    /// For phase 5, tracks whether we are running BuildAgent or TestAgent.
+    pub pipeline_phase5_step: Option<Phase5Step>,
+    /// Target phase for a single `/phase <n>` invocation.
+    pub pipeline_single_phase_target: Option<usize>,
+    /// Dry-run mode: when true, agents are invoked with `--dry-run` (no AI/network).
+    pub dry_run: bool,
 }
 
 /// Fun status messages shown on the info line (Claude Code style).
@@ -291,14 +333,14 @@ impl App {
             mock_mode,
             input_buffer: String::new(),
             input_cursor: 0,
-            current_provider: Some("anthropic".to_string()),
-            current_model: Some("claude-fable-5".to_string()),
+            current_provider: Some("moonshot".to_string()),
+            current_model: Some("kimi-k2.7".to_string()),
             info_view: InfoView::Metrics,
             agents_dir: cwd.clone(),
             project: None,
             scheme: None,
             artifacts_dir: None,
-            cwd,
+            cwd: cwd.clone(),
             spawn_request: None,
             test_stage: None,
             test_resume_from: None,
@@ -334,6 +376,13 @@ impl App {
                 coverage: 0,
             }).collect(),
             build_run_dir: None,
+            project_dir: cwd.clone(),
+            active_agent: ActiveAgentKind::None,
+            pipeline_state: None,
+            pipeline_running: false,
+            pipeline_phase5_step: None,
+            pipeline_single_phase_target: None,
+            dry_run: false,
         };
 
         if mock_mode {
@@ -485,6 +534,22 @@ impl App {
                 }
             }
             Action::AgentExited(code) => {
+                match self.active_agent {
+                    ActiveAgentKind::PipelinePhase(idx) => {
+                        self.handle_pipeline_phase_exited(idx, code);
+                        return;
+                    }
+                    ActiveAgentKind::Build if self.pipeline_phase5_step == Some(Phase5Step::Build) => {
+                        self.handle_pipeline_build_exited(code);
+                        return;
+                    }
+                    ActiveAgentKind::Test if self.pipeline_phase5_step == Some(Phase5Step::Test) => {
+                        self.handle_pipeline_test_exited(code);
+                        return;
+                    }
+                    _ => {}
+                }
+                self.active_agent = ActiveAgentKind::None;
                 match self.phase {
                     Phase::Build => {
                         self.build_exit = Some(code);
@@ -926,6 +991,291 @@ impl App {
         }
     }
 
+    fn handle_pipeline_phase_exited(&mut self, idx: usize, code: i32) {
+        self.active_agent = ActiveAgentKind::None;
+        self.agent_state = AgentState::Idle;
+        self.command_started = None;
+
+        let exit = map_exit_code(code);
+        let result_path = find_latest_result_json(&self.project_dir, idx);
+        let result = result_path
+            .as_deref()
+            .and_then(|p| parse_result_json(p).ok());
+
+        if let Some(ref mut state) = self.pipeline_state {
+            let (messages, stop) = apply_phase_outcome(
+                state,
+                idx,
+                exit,
+                result.as_ref(),
+                result_path.as_deref(),
+            );
+            for msg in messages {
+                self.interaction.push(InteractionMessage {
+                    voice: if stop && exit != crate::pipeline_engine::AgentExitStatus::Success {
+                        Voice::Error
+                    } else {
+                        Voice::Agent
+                    },
+                    text: msg,
+                });
+            }
+            let _ = save_pipeline_state(&pipeline_state_path(&self.project_dir), state);
+            if stop {
+                self.pipeline_running = false;
+            }
+        }
+    }
+
+    fn handle_pipeline_build_exited(&mut self, code: i32) {
+        self.agent_state = AgentState::Idle;
+        self.command_started = None;
+        if code == 0 {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Agent,
+                text: "Pipeline phase 5: BuildAgent passed. Starting TestAgent...".to_string(),
+            });
+            self.pipeline_phase5_step = Some(Phase5Step::Test);
+            self.active_agent = ActiveAgentKind::None;
+            // Queue TestAgent spawn in the main loop, preserving pipeline context.
+            self.spawn_request = Some(SpawnRequest::Test);
+        } else {
+            self.active_agent = ActiveAgentKind::None;
+            self.pipeline_phase5_step = None;
+            if let Some(ref mut state) = self.pipeline_state {
+                let _ = apply_phase_outcome(
+                    state,
+                    5,
+                    map_exit_code(code),
+                    None,
+                    None,
+                );
+                let _ = save_pipeline_state(&pipeline_state_path(&self.project_dir), state);
+            }
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Error,
+                text: format!("Pipeline phase 5: BuildAgent failed (exit {}).", code),
+            });
+            self.pipeline_running = false;
+        }
+    }
+
+    fn handle_pipeline_test_exited(&mut self, code: i32) {
+        self.active_agent = ActiveAgentKind::None;
+        self.agent_state = AgentState::Idle;
+        self.command_started = None;
+        self.pipeline_phase5_step = None;
+
+        if let Some(ref mut state) = self.pipeline_state {
+            let exit = map_exit_code(code);
+            let result_path = find_latest_result_json(&self.project_dir, 5);
+            let result = result_path
+                .as_deref()
+                .and_then(|p| parse_result_json(p).ok());
+            let (messages, stop) = apply_phase_outcome(
+                state,
+                5,
+                exit,
+                result.as_ref(),
+                result_path.as_deref(),
+            );
+            for msg in messages {
+                self.interaction.push(InteractionMessage {
+                    voice: if code != 0 { Voice::Error } else { Voice::Agent },
+                    text: msg,
+                });
+            }
+            let _ = save_pipeline_state(&pipeline_state_path(&self.project_dir), state);
+            if stop {
+                self.pipeline_running = false;
+            }
+        }
+    }
+
+    fn show_pipeline_status(&mut self) {
+        if let Some(ref state) = self.pipeline_state {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Agent,
+                text: format_status_summary(state),
+            });
+        } else {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Agent,
+                text: "No pipeline state. Type /pipeline to start.".to_string(),
+            });
+        }
+    }
+
+    fn start_pipeline(&mut self) {
+        if self.pipeline_running {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "Pipeline is already running.".to_string(),
+            });
+            return;
+        }
+        if self.active_agent != ActiveAgentKind::None {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "An agent is already running. Use /skip or wait for it to finish.".to_string(),
+            });
+            return;
+        }
+        if self.pipeline_state.is_none() {
+            self.pipeline_state = Some(PipelineRunState::with_started_now());
+        }
+        self.pipeline_running = true;
+        let state = self.pipeline_state.as_ref().unwrap();
+        let resume = crate::pipeline_engine::resume_phase_index(state);
+        self.interaction.push(InteractionMessage {
+            voice: Voice::Agent,
+            text: format!("Starting Foundation pipeline from phase {}...", resume),
+        });
+    }
+
+    fn run_single_phase(&mut self, args: &[&str]) {
+        if self.pipeline_running {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "Pipeline is running. Stop it first with /reject or wait for completion.".to_string(),
+            });
+            return;
+        }
+        if self.active_agent != ActiveAgentKind::None {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "An agent is already running.".to_string(),
+            });
+            return;
+        }
+        let (n_str, force) = match args {
+            [n] => (*n, false),
+            [n, "--force"] => (*n, true),
+            _ => {
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Warning,
+                    text: "Usage: /phase <n> [--force]".to_string(),
+                });
+                return;
+            }
+        };
+        let Ok(n) = n_str.parse::<usize>() else {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: format!("'{}' is not a valid phase number.", n_str),
+            });
+            return;
+        };
+        if n > 5 {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "Phase must be between 0 and 5.".to_string(),
+            });
+            return;
+        }
+        if self.pipeline_state.is_none() {
+            self.pipeline_state = Some(PipelineRunState::with_started_now());
+        }
+        let state = self.pipeline_state.as_mut().unwrap();
+        if !force {
+            if let Err(e) = can_start_phase(state, n) {
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Warning,
+                    text: e,
+                });
+                return;
+            }
+        }
+        if let Err(e) = start_phase(state, n) {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Error,
+                text: e,
+            });
+            return;
+        }
+        self.pipeline_single_phase_target = Some(n);
+        self.interaction.push(InteractionMessage {
+            voice: Voice::Agent,
+            text: format!("Starting phase {}...", n),
+        });
+    }
+
+    fn resolve_approval(&mut self, approve: bool) {
+        let Some(ref mut state) = self.pipeline_state else {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "No pipeline is active.".to_string(),
+            });
+            return;
+        };
+        let Some(idx) = awaiting_approval_phase(state) else {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "No phase is awaiting approval.".to_string(),
+            });
+            return;
+        };
+        let result = if approve {
+            approve_phase(state, idx)
+        } else {
+            reject_phase(state, idx)
+        };
+        match result {
+            Ok(msg) => {
+                let _ = save_pipeline_state(&pipeline_state_path(&self.project_dir), state);
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Agent,
+                    text: msg,
+                });
+                if approve {
+                    self.pipeline_running = true;
+                }
+            }
+            Err(e) => {
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Warning,
+                    text: e,
+                });
+            }
+        }
+    }
+
+    fn skip_pipeline_phase(&mut self, n_str: &str) {
+        let Ok(n) = n_str.parse::<usize>() else {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: format!("'{}' is not a valid phase number.", n_str),
+            });
+            return;
+        };
+        if n > 5 {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Warning,
+                text: "Phase must be between 0 and 5.".to_string(),
+            });
+            return;
+        }
+        if self.pipeline_state.is_none() {
+            self.pipeline_state = Some(PipelineRunState::with_started_now());
+        }
+        let state = self.pipeline_state.as_mut().unwrap();
+        match skip_phase(state, n) {
+            Ok(msg) => {
+                let _ = save_pipeline_state(&pipeline_state_path(&self.project_dir), state);
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Agent,
+                    text: msg,
+                });
+            }
+            Err(e) => {
+                self.interaction.push(InteractionMessage {
+                    voice: Voice::Warning,
+                    text: e,
+                });
+            }
+        }
+    }
+
     fn handle_apply_changes(&mut self) {
         if self.pending_changes.is_empty() {
             self.apply_phase = ApplyPhase::Idle;
@@ -1159,6 +1509,28 @@ impl App {
                 });
                 self.advance_phase_after_skip();
             }
+            "/pipeline" => {
+                let rest: Vec<&str> = parts.collect();
+                if rest.first() == Some(&"status") {
+                    self.show_pipeline_status();
+                } else {
+                    self.start_pipeline();
+                }
+            }
+            "/phase" => {
+                let rest: Vec<&str> = parts.collect();
+                self.run_single_phase(&rest);
+            }
+            "/approve" => {
+                self.resolve_approval(true);
+            }
+            "/reject" => {
+                self.resolve_approval(false);
+            }
+            "/skip-phase" => {
+                let n = parts.next().unwrap_or("");
+                self.skip_pipeline_phase(n);
+            }
             "/quit" | "/q" => {
                 self.should_quit = true;
                 self.phase = Phase::Aborted;
@@ -1200,7 +1572,7 @@ impl App {
             "/help" => {
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
-                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /coverage <n>   — set target coverage %\n  /strategy <s>   — set test strategy (priority|coverage|balanced|happy-only)\n  /files <p>      — set test file scope pattern\n  /happy-only     — toggle happy-path-only mode\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: anthropic (default, Claude Fable 5), moonshot, openai, codex, cursor, google, ollama, openrouter".to_string(),
+                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /test-from <s>  — start TestAgent from stage\n  /test-stage <s> — run a single TestAgent stage\n  /pipeline       — run full Foundation pipeline 0→5\n  /pipeline status— show pipeline status\n  /phase <n>      — run a single pipeline phase (optionally --force)\n  /approve        — approve an awaiting-approval gate\n  /reject         — reject an awaiting-approval gate\n  /skip-phase <n> — skip a pipeline phase\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /coverage <n>   — set target coverage %\n  /strategy <s>   — set test strategy (priority|coverage|balanced|happy-only)\n  /files <p>      — set test file scope pattern\n  /happy-only     — toggle happy-path-only mode\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: anthropic (default, Claude Fable 5), moonshot, openai, codex, cursor, google, ollama, openrouter".to_string(),
                 });
             }
             "/artifacts" => {
@@ -1514,9 +1886,11 @@ impl App {
                 });
             }
             "--dry-run" => {
+                self.dry_run = !self.dry_run;
+                let status = if self.dry_run { "enabled" } else { "disabled" };
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
-                    text: "Dry-run mode enabled".to_string(),
+                    text: format!("Dry-run mode {}", status),
                 });
             }
             _ => {

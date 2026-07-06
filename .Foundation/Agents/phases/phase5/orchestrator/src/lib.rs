@@ -6,6 +6,7 @@ pub mod chat;
 pub mod detect;
 pub mod event;
 pub mod mock;
+pub mod pipeline_engine;
 pub mod pty_screen;
 pub mod startup;
 pub mod tui;
@@ -20,7 +21,12 @@ use portable_pty::{MasterPty, PtySize};
 use crate::action::Action;
 use crate::agents::runner::{kill_child, spawn, AgentCmd, RunnerMsg};
 use crate::agents::{build_agent, test_agent};
-use crate::app::{App, AgentState, ApplyPhase, PaneLayout, Phase, SpawnRequest};
+use crate::app::{ActiveAgentKind, App, AgentState, ApplyPhase, PaneLayout, Phase, Phase5Step, SpawnRequest};
+use crate::pipeline_engine::{
+    apply_phase_outcome, detect_project_dir, load_pipeline_state, phase_agent_cmd,
+    pipeline_state_path, save_pipeline_state, start_phase, AgentExitStatus, PipelinePhase,
+    SpawnTarget,
+};
 use crate::apply::parse_changes;
 use crate::event::EventHandler;
 use crate::tui::init_terminal;
@@ -218,6 +224,7 @@ pub fn run(config: Config) -> Result<()> {
     app.agents_dir = config.agents_dir.clone();
     app.project = config.project.clone();
     app.scheme = config.scheme.clone();
+    app.dry_run = config.dry_run;
     if let Some(provider) = config.ai_provider.clone() {
         app.current_provider = Some(provider);
     }
@@ -225,6 +232,23 @@ pub fn run(config: Config) -> Result<()> {
         app.current_model = Some(model);
     }
     app.artifacts_dir = config.artifacts_dir.clone();
+    app.project_dir = detect_project_dir(&app.cwd);
+
+    // Persisted pipeline state path (reused for every transition).
+    let pipeline_state_path = pipeline_state_path(&app.project_dir);
+
+    // Offer to resume a persisted pipeline if one exists.
+    if let Some(state) = load_pipeline_state(&pipeline_state_path) {
+        let resume_idx = crate::pipeline_engine::resume_phase_index(&state);
+        app.interaction.push(crate::app::InteractionMessage {
+            voice: crate::ui::theme::Voice::Agent,
+            text: format!(
+                "Saved pipeline state found (resume from phase {}). Type /pipeline to resume.",
+                resume_idx
+            ),
+        });
+        app.pipeline_state = Some(state);
+    }
 
     if !config.mock {
         app.interaction.push(crate::app::InteractionMessage {
@@ -300,7 +324,7 @@ pub fn run(config: Config) -> Result<()> {
                         app.current_model.as_deref(),
                         config.max_attempts,
                         config.verbose,
-                        config.dry_run,
+                        app.dry_run,
                     );
                     let show_pipeline = crate::ui::pipeline::should_show(&app);
                     match spawn(cmd, pty_size(term_cols, term_rows, app.pane_layout, app.bottom_expanded, show_pipeline)) {
@@ -308,6 +332,7 @@ pub fn run(config: Config) -> Result<()> {
                             child_opt = Some(c);
                             master_opt = Some(m);
                             writer_opt = Some(w);
+                            app.active_agent = ActiveAgentKind::Build;
                             event_handler.replace_rx(rx);
                         }
                         Err(e) => {
@@ -333,7 +358,7 @@ pub fn run(config: Config) -> Result<()> {
                         stage,
                         resume_from,
                         config.verbose,
-                        config.dry_run,
+                        app.dry_run,
                         app.test_coverage,
                         app.test_strategy.as_deref(),
                         app.test_files.as_deref(),
@@ -345,6 +370,7 @@ pub fn run(config: Config) -> Result<()> {
                             child_opt = Some(c);
                             master_opt = Some(m);
                             writer_opt = Some(w);
+                            app.active_agent = ActiveAgentKind::Test;
                             event_handler.replace_rx(rx);
                         }
                         Err(e) => {
@@ -352,12 +378,181 @@ pub fn run(config: Config) -> Result<()> {
                                 voice: crate::ui::theme::Voice::Error,
                                 text: format!("Failed to spawn TestAgent: {}", e),
                             });
-                            app.phase = Phase::Failed;
+                            if app.pipeline_phase5_step == Some(Phase5Step::Test) {
+                                app.pipeline_phase5_step = None;
+                                app.pipeline_running = false;
+                                if let Some(ref mut state) = app.pipeline_state {
+                                    let _ = apply_phase_outcome(
+                                        state,
+                                        5,
+                                        AgentExitStatus::Misconfiguration,
+                                        None,
+                                        None,
+                                    );
+                                    let _ = save_pipeline_state(
+                                        &pipeline_state_path,
+                                        state,
+                                    );
+                                }
+                            } else {
+                                app.phase = Phase::Failed;
+                            }
                             app.agent_state = AgentState::Idle;
                         }
                     }
                 }
                 None => {}
+            }
+        }
+
+        // Single-phase spawn from `/phase <n>`.
+        if !config.mock && child_opt.is_none() && app.active_agent == ActiveAgentKind::None {
+            if let Some(idx) = app.pipeline_single_phase_target.take() {
+                let provider = app.current_provider.as_deref();
+                let phases_dir = phases_dir(&config.agents_dir);
+                match phase_agent_cmd(&phases_dir, &app.project_dir, provider, idx, app.dry_run) {
+                    SpawnTarget::Phase5Existing => {
+                        // Single /phase 5 is not supported; it requires the composite build+test flow.
+                        app.interaction.push(crate::app::InteractionMessage {
+                            voice: crate::ui::theme::Voice::Warning,
+                            text: "Use /build and /test for phase 5, or run the full pipeline with /pipeline.".to_string(),
+                        });
+                        if let Some(ref mut state) = app.pipeline_state {
+                            let _ = apply_phase_outcome(
+                                state,
+                                idx,
+                                AgentExitStatus::Misconfiguration,
+                                None,
+                                None,
+                            );
+                            let _ = save_pipeline_state(
+                                &pipeline_state_path,
+                                state,
+                            );
+                        }
+                    }
+                    SpawnTarget::Script(cmd) => {
+                        app.active_agent = ActiveAgentKind::PipelinePhase(idx);
+                        app.command_started = Some(std::time::Instant::now());
+                        app.agent_state = AgentState::Acting;
+                        let show_pipeline = crate::ui::pipeline::should_show(&app);
+                        match spawn(
+                            cmd,
+                            pty_size(
+                                term_cols,
+                                term_rows,
+                                app.pane_layout,
+                                app.bottom_expanded,
+                                show_pipeline,
+                            ),
+                        ) {
+                            Ok((c, m, w, rx)) => {
+                                child_opt = Some(c);
+                                master_opt = Some(m);
+                                writer_opt = Some(w);
+                                event_handler.replace_rx(rx);
+                            }
+                            Err(e) => {
+                                app.interaction.push(crate::app::InteractionMessage {
+                                    voice: crate::ui::theme::Voice::Error,
+                                    text: format!("Failed to spawn phase {} agent: {}", idx, e),
+                                });
+                                if let Some(ref mut state) = app.pipeline_state {
+                                    let _ = apply_phase_outcome(
+                                        state,
+                                        idx,
+                                        AgentExitStatus::Misconfiguration,
+                                        None,
+                                        None,
+                                    );
+                                    let _ = save_pipeline_state(
+                                        &pipeline_state_path,
+                                        state,
+                                    );
+                                }
+                                app.active_agent = ActiveAgentKind::None;
+                                app.agent_state = AgentState::Idle;
+                            }
+                        }
+                    }
+                    SpawnTarget::Missing(msg) => {
+                        app.interaction.push(crate::app::InteractionMessage {
+                            voice: crate::ui::theme::Voice::Error,
+                            text: msg,
+                        });
+                        if let Some(ref mut state) = app.pipeline_state {
+                            let _ = apply_phase_outcome(
+                                state,
+                                idx,
+                                AgentExitStatus::Misconfiguration,
+                                None,
+                                None,
+                            );
+                            let _ = save_pipeline_state(
+                                &pipeline_state_path,
+                                state,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pipeline auto-advance: when no child is running and the pipeline is active,
+        // compute and spawn the next phase.
+        if !config.mock && child_opt.is_none() && app.active_agent == ActiveAgentKind::None {
+            if let Some(next_spawn) = next_pipeline_spawn(&config, &mut app) {
+                app.active_agent = next_spawn.agent_kind;
+                app.command_started = Some(std::time::Instant::now());
+                app.agent_state = AgentState::Acting;
+                app.interaction.push(crate::app::InteractionMessage {
+                    voice: crate::ui::theme::Voice::Agent,
+                    text: next_spawn.message,
+                });
+                let show_pipeline = crate::ui::pipeline::should_show(&app);
+                match spawn(
+                    next_spawn.cmd,
+                    pty_size(
+                        term_cols,
+                        term_rows,
+                        app.pane_layout,
+                        app.bottom_expanded,
+                        show_pipeline,
+                    ),
+                ) {
+                    Ok((c, m, w, rx)) => {
+                        child_opt = Some(c);
+                        master_opt = Some(m);
+                        writer_opt = Some(w);
+                        event_handler.replace_rx(rx);
+                    }
+                    Err(e) => {
+                        app.interaction.push(crate::app::InteractionMessage {
+                            voice: crate::ui::theme::Voice::Error,
+                            text: format!("Failed to spawn pipeline agent: {}", e),
+                        });
+                        // Mark the phase we just started as failed.
+                        if let Some(ref mut state) = app.pipeline_state {
+                            if let Some(idx) = state.current_phase {
+                                let idx = idx as usize;
+                                let _ = apply_phase_outcome(
+                                    state,
+                                    idx,
+                                    AgentExitStatus::Misconfiguration,
+                                    None,
+                                    None,
+                                );
+                                let _ = save_pipeline_state(
+                                    &pipeline_state_path,
+                                    state,
+                                );
+                            }
+                        }
+                        app.active_agent = ActiveAgentKind::None;
+                        app.pipeline_running = false;
+                        app.agent_state = AgentState::Idle;
+                    }
+                }
             }
         }
 
@@ -558,5 +753,101 @@ fn cargo_build_args() -> Vec<String> {
         vec!["build".to_string(), "--release".to_string()]
     } else {
         vec!["build".to_string()]
+    }
+}
+
+/// Directory containing phase0..phase5 agent scripts (parent of the phase5 dir).
+fn phases_dir(agents_dir: &std::path::Path) -> std::path::PathBuf {
+    agents_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| agents_dir.to_path_buf())
+}
+
+/// Description of the next pipeline step to spawn.
+pub struct PipelineSpawn {
+    pub cmd: AgentCmd,
+    pub agent_kind: ActiveAgentKind,
+    pub message: String,
+}
+
+/// Compute the next pipeline step, updating state for the phase that will run.
+/// Returns None when the pipeline is complete, halted, or no advance is needed.
+fn next_pipeline_spawn(config: &Config, app: &mut App) -> Option<PipelineSpawn> {
+    let state = app.pipeline_state.as_mut()?;
+    if !app.pipeline_running {
+        return None;
+    }
+
+    let next_idx = crate::pipeline_engine::resume_phase_index(state);
+    if next_idx >= state.phases.len() {
+        // Pipeline complete.
+        app.pipeline_running = false;
+        state.finished_at = Some(crate::pipeline_engine::now_iso());
+        let _ = save_pipeline_state(&pipeline_state_path(&app.project_dir), state);
+        app.interaction.push(crate::app::InteractionMessage {
+            voice: crate::ui::theme::Voice::Agent,
+            text: "Pipeline complete (phases 0-5).".to_string(),
+        });
+        return None;
+    }
+
+    if let Err(e) = start_phase(state, next_idx) {
+        app.interaction.push(crate::app::InteractionMessage {
+            voice: crate::ui::theme::Voice::Error,
+            text: e,
+        });
+        app.pipeline_running = false;
+        return None;
+    }
+
+    let provider = app.current_provider.as_deref();
+    let phases_dir = phases_dir(&config.agents_dir);
+
+    match phase_agent_cmd(&phases_dir, &app.project_dir, provider, next_idx, app.dry_run) {
+        SpawnTarget::Phase5Existing => {
+            app.pipeline_phase5_step = Some(Phase5Step::Build);
+            let cmd = build_agent::build_agent_cmd(
+                &config.agents_dir,
+                app.project.as_deref(),
+                app.scheme.as_deref(),
+                provider,
+                app.current_model.as_deref(),
+                config.max_attempts,
+                config.verbose,
+                app.dry_run,
+            );
+            Some(PipelineSpawn {
+                cmd,
+                agent_kind: ActiveAgentKind::Build,
+                message: "Pipeline phase 5: starting BuildAgent...".to_string(),
+            })
+        }
+        SpawnTarget::Script(cmd) => {
+            let name = PipelinePhase::from_index(next_idx)
+                .map(|p| p.display_name())
+                .unwrap_or("?");
+            Some(PipelineSpawn {
+                cmd,
+                agent_kind: ActiveAgentKind::PipelinePhase(next_idx),
+                message: format!("Pipeline phase {}: starting {}...", next_idx, name),
+            })
+        }
+        SpawnTarget::Missing(msg) => {
+            let _ = apply_phase_outcome(
+                state,
+                next_idx,
+                AgentExitStatus::Misconfiguration,
+                None,
+                None,
+            );
+            let _ = save_pipeline_state(&pipeline_state_path(&app.project_dir), state);
+            app.interaction.push(crate::app::InteractionMessage {
+                voice: crate::ui::theme::Voice::Error,
+                text: msg,
+            });
+            app.pipeline_running = false;
+            None
+        }
     }
 }

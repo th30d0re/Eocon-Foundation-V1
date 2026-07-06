@@ -748,7 +748,7 @@ run_ai_cli() {
                 return 1
             fi
             ;;
-        claude)
+        claude|anthropic)
             if command -v claude >/dev/null 2>&1; then
                 ai_cmd="claude"
             else
@@ -815,7 +815,7 @@ run_ai_cli() {
         cursor)
             ai_cmd_full="cat \"$prompt_file\" | $ai_cmd --force --print --output-format text"
             ;;
-        claude)
+        claude|anthropic)
             ai_cmd_full="cat \"$prompt_file\" | $ai_cmd --dangerously-skip-permissions -p -"
             ;;
         codex|openai)

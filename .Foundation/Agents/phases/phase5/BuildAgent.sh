@@ -248,6 +248,7 @@ SIDEBAR_MODE="${SIDEBAR_MODE:-false}"  # Enable persistent top status bar (sideb
 SIDEBAR_STAGE="Initializing"  # Current stage displayed in sidebar
 CURRENT_PLAN_INDEX=0  # Index of current plan in sequence
 SMART_DOCS="${SMART_DOCS:-true}"  # Use cursor-agent RAG to filter relevant swift docs
+BUILD_GUIDES="${BUILD_GUIDES:-1}"  # Enable Guides write-back by default
 MAX_CONTEXT_CHARS="${MAX_CONTEXT_CHARS:-400000}"  # Hard cap on gathered context sent to AI (~400KB)
 
 # Verbosity control
@@ -410,6 +411,7 @@ EXECUTION OPTIONS:
     --no-defaults           Skip loading defaults.conf (for testing)
     --fancy-ui              Enable fancy terminal UI (colors, icons, progress bars)
     --no-fancy-ui           Disable fancy UI (plain text, CI/CD friendly)
+    --no-guides             Disable generating Guide documentation after successful build
     --help                  Show this help message
 
 SESSION MANAGEMENT:
@@ -694,6 +696,10 @@ main() {
                 ;;
             --dry-run)
                 DRY_RUN="true"
+                shift 1
+                ;;
+            --no-guides)
+                BUILD_GUIDES="0"
                 shift 1
                 ;;
             --verbose|-v)
