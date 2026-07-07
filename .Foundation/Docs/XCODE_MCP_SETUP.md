@@ -41,7 +41,7 @@ The XcodeBuildMCP server is set up and ready to use with the Foundation project.
 
 **Status**: ✅ Installed and Configured
 
-- **CLI Location**: `/Users/emmanuel/.bun/bin/codex`
+- **CLI Location**: `$HOME/.bun/bin/codex`
 - **API Key**: ✅ Set (OPENAI_API_KEY)
 - **Provider**: OpenAI Codex
 - **MCP Server**: ✅ Added (`xcodebuildmcp`)
