@@ -5,7 +5,7 @@
 
 ## Summary
 
-- **Paths changed:** 24
+- **Paths changed:** 33
 - **Files changed:** 12
 - **Paths left untouched:** Generated error logs in `.Foundation/errors/`, LaTeX auxiliary files (`.fdb_latexmk`, `.fls`), and the `.Foundation/Docs/swiftDocs` submodule.
 
