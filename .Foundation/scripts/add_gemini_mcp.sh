@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${1:-$(pwd)}"
 GEMINI_DIR="${PROJECT_ROOT}/.gemini"
 SETTINGS_FILE="${GEMINI_DIR}/settings.json"
-SERVER_PATH="/Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
+SERVER_PATH="${XCODEBUILDMCP_SERVER:-${HOME}/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs}"
 
 # Colors for output
 GREEN='\033[0;32m'

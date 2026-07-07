@@ -1,6 +1,6 @@
 # Agent Instructions — Eocon Foundation V1
 
-These instructions apply to all agents working in `/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/`. They supplement the parent instructions in `/Users/emmanuel/Dev/Tools/AGENTS.md`; where the two conflict, this project-specific file takes precedence.
+These instructions apply to all agents working in this repository (`Eocon-Foundation-V1`). They supplement the parent instructions in `$HOME/Dev/Tools/AGENTS.md`; where the two conflict, this project-specific file takes precedence.
 
 ## Project Overview
 
@@ -153,10 +153,10 @@ The full phase contract is in `.Foundation/Agents/phases/PHASE_CONTRACT.md`.
 
 ## Logging Requirements
 
-This project follows the session-logging requirement defined in the parent `/Users/emmanuel/Dev/Tools/AGENTS.md`:
+This project follows the session-logging requirement defined in the parent `$HOME/Dev/Tools/AGENTS.md`:
 
 - Create a comprehensive markdown log for every request that results in code changes, configuration changes, or implementations.
-- Store logs in `/Users/emmanuel/Library/Mobile Documents/iCloud~md~obsidian/Documents/Root/AI Session Logs/`.
+- Store logs in `$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/Root/AI Session Logs/`.
 - Name the log `session-YYYY-MM-DD-HHMMSS.md`.
 - Include: what was requested, how it was fixed, challenges encountered, and six next ideas.
 - Specify the model name at the top of the log file.

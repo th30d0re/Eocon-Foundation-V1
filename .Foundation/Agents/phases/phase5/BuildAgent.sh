@@ -56,7 +56,7 @@ find_foundation_lib() {
         "${WORK_DIR}/.Foundation/lib"
         "${WORK_DIR}/.Foundation/lib"
         "${HOME}/.foundation/lib"
-        "/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/lib"
+        "${PROJECT_ROOT}/.Foundation/lib"
     )
 
     for loc in "${lib_locations[@]}"; do
@@ -335,7 +335,7 @@ CONTEXT OPTIONS:
         4. All docs (final fallback)
 
     Auto-detection and auto-update:
-      • Primary: /Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs
+      • Primary: ${PROJECT_ROOT}/.Foundation/Docs/swiftDocs
         - Auto-clones from https://github.com/th30d0re/swiftDocs.git if missing
         - Auto-updates on each run (checks for new commits)
       • Fallback search locations:

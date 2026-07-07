@@ -12,7 +12,7 @@ The XcodeBuildMCP server has been successfully added to Codex CLI and is ready t
 - **Name**: `xcodebuildmcp`
 - **Status**: ✅ Enabled
 - **Transport**: stdio
-- **Command**: `node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs`
+- **Command**: `node $HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs`
 - **Tools Available**: 71 MCP tools
 
 ### Verification
@@ -28,7 +28,7 @@ codex mcp get xcodebuildmcp
 Expected output:
 ```
 Name           Command  Args                                                                                  Env  Cwd  Status   Auth       
-xcodebuildmcp  node     /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs  -    -    enabled  Unsupported
+xcodebuildmcp  node     $HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs  -    -    enabled  Unsupported
 ```
 
 ## Usage
@@ -141,12 +141,12 @@ MCP server configurations are stored in `~/.codex/config.toml`. The XcodeBuildMC
 
 2. **Verify server path**:
    ```bash
-   ls -la /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+   ls -la "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
    ```
 
 3. **Test server manually**:
    ```bash
-   node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+   node "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
    ```
 
 ### Tools Not Appearing

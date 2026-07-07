@@ -33,7 +33,7 @@ build_followup_prompt_with_strategy() {
 
 TESTING & DEBUGGING REFERENCE:
 For building, testing, and debugging iOS/macOS apps, reference this workflow guide:
-/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
+${PROJECT_ROOT}/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
 
 This guide covers:
 - XcodeBuild MCP server tools for programmatic Xcode interaction
@@ -171,7 +171,7 @@ IMPORTANT INSTRUCTIONS:
 
 TESTING & DEBUGGING REFERENCE:
 For building, testing, and debugging iOS/macOS apps, reference this workflow guide:
-/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
+${PROJECT_ROOT}/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
 
 This guide covers:
 - XcodeBuild MCP server tools for programmatic Xcode interaction
@@ -234,7 +234,7 @@ build_followup_prompt() {
 
 TESTING & DEBUGGING REFERENCE:
 For building, testing, and debugging iOS/macOS apps, reference this workflow guide:
-/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
+${PROJECT_ROOT}/.Foundation/Docs/swiftDocs/Testing/XCODEBUILD_MCP_WORKFLOW.md
 
 This guide covers:
 - XcodeBuild MCP server tools for programmatic Xcode interaction

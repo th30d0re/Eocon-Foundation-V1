@@ -10,7 +10,7 @@ The XcodeBuildMCP server has been successfully added to Gemini CLI and is ready 
 - **Name**: `xcodebuildmcp`
 - **Status**: ✅ Connected
 - **Transport**: stdio
-- **Command**: `node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs`
+- **Command**: `node $HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs`
 - **Tools Available**: 71 MCP tools
 - **Scope**: Project-level (configured for current project)
 
@@ -25,7 +25,7 @@ Expected output:
 ```
 Configured MCP servers:
 
-✓ xcodebuildmcp: node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs (stdio) - Connected
+✓ xcodebuildmcp: node $HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs (stdio) - Connected
 ```
 
 ## Usage
@@ -196,7 +196,7 @@ The script will:
        "xcodebuildmcp": {
          "command": "node",
          "args": [
-           "/Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
+           "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
          ]
        }
      }
@@ -212,7 +212,7 @@ The script will:
 cd /path/to/your/project
 
 # Add the server
-gemini mcp add xcodebuildmcp node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+gemini mcp add xcodebuildmcp node "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
 ```
 
 ### Why Project-Level?
@@ -234,12 +234,12 @@ Gemini CLI uses project-level configuration to:
 
 2. **Verify server path**:
    ```bash
-   ls -la /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+   ls -la "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
    ```
 
 3. **Test server manually**:
    ```bash
-   node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+   node "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
    ```
 
 ### Tools Not Appearing
@@ -267,13 +267,13 @@ If the server shows as not connected:
 
 2. Verify the server file exists and is executable:
    ```bash
-   ls -la /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+   ls -la "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
    ```
 
 3. Try removing and re-adding the server:
    ```bash
    gemini mcp remove xcodebuildmcp
-   gemini mcp add xcodebuildmcp node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+   gemini mcp add xcodebuildmcp node "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
    ```
 
 ## Comparison with Codex CLI

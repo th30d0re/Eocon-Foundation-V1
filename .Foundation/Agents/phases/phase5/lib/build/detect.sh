@@ -227,7 +227,7 @@ validate_inputs() {
 # Checks for updates and pulls if available
 
 ensure_swift_docs_repo() {
-    local foundation_swift_docs="/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs"
+    local foundation_swift_docs="${PROJECT_ROOT}/.Foundation/Docs/swiftDocs"
     local swift_docs_repo="https://github.com/th30d0re/swiftDocs.git"
     
     # Check if git is available
@@ -371,7 +371,7 @@ detect_swift_docs() {
     # Also check .Foundation directories explicitly (hidden dirs might be missed by main search)
     if [ -z "$docs_path" ]; then
         local foundation_paths=(
-            "/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/.Foundation/Docs/swiftDocs"
+            "${PROJECT_ROOT}/.Foundation/Docs/swiftDocs"
             "${WORK_DIR}/.Foundation/Docs/swiftDocs"
             "${WORK_DIR}/.Foundation/.Foundation/Docs/swiftDocs"
             "${WORK_DIR}/.foundation/docs/swiftDocs"

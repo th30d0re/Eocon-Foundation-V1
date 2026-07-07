@@ -15,7 +15,7 @@ The XcodeBuildMCP server is set up and ready to use with the Foundation project.
 ### Session Defaults
 ```json
 {
-  "projectPath": "/Users/emmanuel/Dev/Tools/Eocon-Foundation-V1/Foundation/Foundation.xcodeproj",
+  "projectPath": "${EOCON_PROJECT_ROOT:-$HOME/Dev/Tools/Eocon-Foundation-V1}/Foundation/Foundation.xcodeproj",
   "scheme": "Foundation",
   "simulatorName": "iPhone 17 Pro",
   "useLatestOS": true

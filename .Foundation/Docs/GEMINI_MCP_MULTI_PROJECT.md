@@ -20,7 +20,7 @@ Gemini CLI uses **project-level** MCP server configuration. The XcodeBuildMCP se
 
 ```bash
 cd /path/to/project
-gemini mcp add xcodebuildmcp node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs
+gemini mcp add xcodebuildmcp node "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
 ```
 
 ### Manual Setup
@@ -32,7 +32,7 @@ gemini mcp add xcodebuildmcp node /Users/emmanuel/.smithery/cache/servers/camero
        "xcodebuildmcp": {
          "command": "node",
          "args": [
-           "/Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
+           "$HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs"
          ]
        }
      }
@@ -51,9 +51,9 @@ If you have many projects, you can use a simple loop:
 ```bash
 # List of project directories
 projects=(
-  "/Users/emmanuel/Dev/Project1"
-  "/Users/emmanuel/Dev/Project2"
-  "/Users/emmanuel/Dev/Project3"
+  "$HOME/Dev/Project1"
+  "$HOME/Dev/Project2"
+  "$HOME/Dev/Project3"
 )
 
 # Add MCP server to each
@@ -76,7 +76,7 @@ You should see:
 ```
 Configured MCP servers:
 
-✓ xcodebuildmcp: node /Users/emmanuel/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs (stdio) - Connected
+✓ xcodebuildmcp: node $HOME/.smithery/cache/servers/cameroncooke/xcodebuildmcp/current/index.cjs (stdio) - Connected
 ```
 
 ## Why Project-Level?

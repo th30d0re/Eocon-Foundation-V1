@@ -3,6 +3,13 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 
+fn home_path(rel: &str) -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(rel))
+        .unwrap_or_else(|| PathBuf::from(rel))
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: String,
@@ -171,7 +178,7 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
     let model = req.model.as_str();
     match provider {
         "anthropic" => {
-            let exe = find_exe("claude", &["/opt/homebrew/bin/claude"])?;
+            let exe = find_exe("claude", &[PathBuf::from("/opt/homebrew/bin/claude")])?;
             let mut args = vec!["-p".into(), "--model".into(), model.into()];
             if let Some(ref system) = req.system_prompt {
                 args.push("--system-prompt".into());
@@ -185,7 +192,7 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
             })
         }
         "moonshot" => {
-            let exe = find_exe("kimi", &["/opt/homebrew/bin/kimi"])?;
+            let exe = find_exe("kimi", &[PathBuf::from("/opt/homebrew/bin/kimi")])?;
             let empty_mcp = empty_mcp_config_path();
             Some(CliConfig {
                 program: exe,
@@ -200,8 +207,8 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
         }
         "openai" | "codex" => {
             let exe = find_exe("codex", &[
-                "/Users/emmanuel/.bun/bin/codex",
-                "/opt/homebrew/bin/codex",
+                home_path(".bun/bin/codex"),
+                PathBuf::from("/opt/homebrew/bin/codex"),
             ])?;
             let output_file = std::env::temp_dir()
                 .join(format!("orch-codex-{}.txt", std::process::id()));
@@ -221,7 +228,7 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
             })
         }
         "cursor" => {
-            let exe = find_exe("cursor", &["/Users/emmanuel/.local/bin/cursor"])?;
+            let exe = find_exe("cursor", &[home_path(".local/bin/cursor")])?;
             Some(CliConfig {
                 program: exe,
                 args: vec!["agent".into()],
@@ -231,8 +238,8 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
         }
         "ollama" => {
             let exe = find_exe("ollama", &[
-                "/usr/local/bin/ollama",
-                "/opt/homebrew/bin/ollama",
+                PathBuf::from("/usr/local/bin/ollama"),
+                PathBuf::from("/opt/homebrew/bin/ollama"),
             ])?;
             Some(CliConfig {
                 program: exe,
@@ -242,7 +249,7 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
             })
         }
         "google" => {
-            let exe = find_exe("gemini", &["/opt/homebrew/bin/gemini"])?;
+            let exe = find_exe("gemini", &[PathBuf::from("/opt/homebrew/bin/gemini")])?;
             Some(CliConfig {
                 program: exe,
                 args: vec![],
@@ -255,7 +262,7 @@ fn build_cli_config(req: &ChatRequest) -> Option<CliConfig> {
 }
 
 /// Search for an executable: first via `which`, then fallback paths.
-fn find_exe(name: &str, fallbacks: &[&str]) -> Option<String> {
+fn find_exe(name: &str, fallbacks: &[PathBuf]) -> Option<String> {
     if let Ok(output) = Command::new("which").arg(name).output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -265,8 +272,8 @@ fn find_exe(name: &str, fallbacks: &[&str]) -> Option<String> {
         }
     }
     for path in fallbacks {
-        if std::path::Path::new(path).exists() {
-            return Some(path.to_string());
+        if path.exists() {
+            return Some(path.to_string_lossy().to_string());
         }
     }
     None
