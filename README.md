@@ -1,5 +1,7 @@
 # Eocon Foundation V1
 
+[![CI](https://github.com/nottinghillai/Eocon-Foundation-V1/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nottinghillai/Eocon-Foundation-V1/actions/workflows/ci.yml)
+
 A comprehensive framework and knowledge base for building agentic applications using the Foundation methodology.
 
 ## Overview
