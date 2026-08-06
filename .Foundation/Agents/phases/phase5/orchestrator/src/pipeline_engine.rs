@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::runner::AgentCmd;
+use crate::kgpe::{load_manifests, ExecSpec, GraphEngine, GraphReport, Node, NodeState};
 
 /// The six Foundation pipeline phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +225,155 @@ pub enum SpawnTarget {
     Phase5Existing,
     /// Agent script is missing.
     Missing(String),
+}
+
+/// Discover the six manifest files that define the seven-node Foundation agent graph.
+pub fn discover_agent_manifests(phases_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::with_capacity(6);
+    for phase in 0..=5 {
+        let path = phases_dir.join(format!("phase{phase}/node.json"));
+        if !path.is_file() {
+            return Err(format!(
+                "agent graph manifest not found at expected path {}",
+                path.display()
+            ));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Load and validate the real agent graph. Errors name the manifest, node, or artifact.
+pub fn load_agent_graph(phases_dir: &Path) -> Result<GraphEngine, String> {
+    let paths = discover_agent_manifests(phases_dir)?;
+    let nodes = load_manifests(&paths).map_err(|error| error.to_string())?;
+    GraphEngine::new(nodes).map_err(|error| error.to_string())
+}
+
+pub fn graph_state_path(project_dir: &Path) -> PathBuf {
+    project_dir.join("Artifacts").join("graph_state.json")
+}
+
+pub fn node_phase(id: &str) -> Option<usize> {
+    id.strip_prefix("phase")?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Build a command from a node's manifest exec declaration.
+pub fn node_agent_cmd(
+    phases_dir: &Path,
+    project_dir: &Path,
+    provider: Option<&str>,
+    model: Option<&str>,
+    node: &Node,
+    dry_run: bool,
+) -> SpawnTarget {
+    let ExecSpec::Script { path, args } = &node.exec else {
+        return SpawnTarget::Missing(format!(
+            "agent node '{}' has non-script exec specification",
+            node.id
+        ));
+    };
+    let program = phases_dir.join(path);
+    if !program.is_file() {
+        return SpawnTarget::Missing(format!(
+            "agent node '{}' script not found: {}",
+            node.id,
+            program.display()
+        ));
+    }
+    let plans = project_dir.join("Plans");
+    let replacements = [
+        ("${PROJECT_DIR}", project_dir.to_string_lossy().into_owned()),
+        ("${CONSTITUTION_DIR}", project_dir.join("Constitution").to_string_lossy().into_owned()),
+        ("${PLANS_DIR}", plans.to_string_lossy().into_owned()),
+        ("${QUESTIONS_FILE}", plans.join("Questions.md").to_string_lossy().into_owned()),
+        ("${PROMPT}", "Foundation graph pipeline execution".to_string()),
+    ];
+    let mut resolved = args
+        .iter()
+        .map(|arg| {
+            replacements
+                .iter()
+                .find_map(|(key, value)| (arg == key).then(|| value.clone()))
+                .unwrap_or_else(|| arg.clone())
+        })
+        .collect::<Vec<_>>();
+    if let Some(value) = provider {
+        resolved.extend(["--ai-provider".into(), value.into()]);
+    }
+    if let Some(value) = model {
+        resolved.extend(["--model".into(), value.into()]);
+    }
+    if dry_run && !resolved.iter().any(|arg| arg == "--dry-run") {
+        resolved.push("--dry-run".into());
+    }
+    SpawnTarget::Script(AgentCmd {
+        program: program.to_string_lossy().into_owned(),
+        args: resolved,
+        env: vec![],
+        cwd: Some(project_dir.to_string_lossy().into_owned()),
+    })
+}
+
+pub fn format_graph(engine: &GraphEngine) -> String {
+    let mut lines = vec!["Foundation Agent Graph:".to_string()];
+    for (stage, ids) in engine.report.stages.iter().enumerate() {
+        lines.push(format!("  Stage {}", stage + 1));
+        for id in ids {
+            let node = engine.nodes.iter().find(|node| &node.id == id);
+            let label = node.map_or(id.as_str(), |node| node.label.as_str());
+            let state = engine.states.get(id).copied().unwrap_or(NodeState::Pending);
+            lines.push(format!("    {} [{}]", label, graph_state_label(state)));
+        }
+    }
+    lines.join("\n")
+}
+
+pub fn format_graph_report(report: &GraphReport) -> String {
+    format!(
+        "Graph validation: {}\nErrors: {:#?}\nWarnings: {:#?}\nStages: {:#?}\nCritical path: {}",
+        if report.is_valid() { "valid" } else { "invalid" },
+        report.errors,
+        report.warnings,
+        report.stages,
+        report.critical_path.join(" -> ")
+    )
+}
+
+pub fn render_graph_mermaid(engine: &GraphEngine) -> String {
+    let mut lines = vec!["graph TD".to_string()];
+    for node in &engine.nodes {
+        lines.push(format!("    {}[\"{}\"]", mermaid_id(&node.id), node.label));
+    }
+    for edge in &engine.edges {
+        lines.push(format!(
+            "    {} --> {}",
+            mermaid_id(&edge.from),
+            mermaid_id(&edge.to)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn mermaid_id(id: &str) -> String {
+    id.replace(['.', '-'], "_")
+}
+
+pub fn graph_state_label(state: NodeState) -> &'static str {
+    match state {
+        NodeState::Pending => "pending",
+        NodeState::Ready => "ready",
+        NodeState::Running => "running",
+        NodeState::AwaitingApproval => "awaiting approval",
+        NodeState::Succeeded => "succeeded",
+        NodeState::Failed => "failed",
+        NodeState::HumanIntervention => "human intervention",
+        NodeState::Skipped => "skipped",
+    }
 }
 
 /// Resolve the absolute path to a phase agent script.

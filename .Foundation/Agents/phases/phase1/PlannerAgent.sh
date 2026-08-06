@@ -132,11 +132,24 @@ EOF
 
 <!-- DRY-RUN PLACEHOLDER -->
 EOF
+    cat > "$PROJECT_DIR/Plans/plan1/waves/wave1/node.json" <<'EOF'
+{
+  "schemaVersion": 1,
+  "id": "plan1.wave1",
+  "kind": "work",
+  "label": "DRY-RUN PLACEHOLDER wave",
+  "exec": { "type": "wave", "planPath": "Plans/plan1/waves/wave1" },
+  "consumes": [],
+  "produces": [ { "type": "code.module", "name": "dry-run-placeholder" } ],
+  "gate": "none",
+  "retry": { "maxAttempts": 3 }
+}
+EOF
 }
 
 if [ "$DRY_RUN" = "true" ]; then
     write_dry_run_outputs
-    write_phase_result "$PROJECT_DIR" 1 "PlannerAgent" "dry_run" '["Plans/plan1/plan1.md","Plans/plan1/test1.md","Plans/plan1/decision_log.md","Plans/plan1/waves/wave1/subplan1.md","Plans/plan1/waves/wave1/subtest1.md"]' "false" >/dev/null
+    write_phase_result "$PROJECT_DIR" 1 "PlannerAgent" "dry_run" '["Plans/plan1/plan1.md","Plans/plan1/test1.md","Plans/plan1/decision_log.md","Plans/plan1/waves/wave1/subplan1.md","Plans/plan1/waves/wave1/subtest1.md","Plans/plan1/waves/wave1/node.json"]' "false" >/dev/null
     log_success "Phase 1 dry run complete"
     exit 0
 fi
@@ -148,8 +161,11 @@ fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/foundation_phase1_XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
-{
-    cat <<'EOF'
+
+build_prompt() {
+    local attempt="$1"
+    {
+        cat <<EOF
 You are the Foundation Phase 1 Planner Agent.
 
 Parse each Constitution into Plans/planN folders with planN.md, testN.md,
@@ -161,36 +177,96 @@ technical approach, acceptance criteria, test requirements, estimated complexity
 and target stack specifications. Waves must be token-efficient and sized for
 one-shot model execution.
 
+For EVERY wave you emit, also emit exactly one KGPE work-node manifest at
+Plans/planN/waves/waveM/node.json using this schema:
+
+{
+  "schemaVersion": 1,
+  "id": "planN.waveM",
+  "kind": "work",
+  "label": "<short wave label>",
+  "exec": { "type": "wave", "planPath": "Plans/planN/waves/waveM" },
+  "consumes": [ { "type": "code.module", "name": "<upstream-module>" } ],
+  "produces": [
+    { "type": "code.module", "name": "<module>" },
+    { "type": "test.result", "name": "<module>" }
+  ],
+  "gate": "none",
+  "retry": { "maxAttempts": 3 }
+}
+
+Manifest rules (hard requirements):
+- Every "type" value must come ONLY from this closed vocabulary:
+  constitution.root, constitution.sub, plan.doc, plan.test, wave.subplan,
+  wave.subtest, wave.unittest, questions.doc, decision.log, stages.graph,
+  code.module, test.result, guide.doc.
+- An artifact ref is {"type": "..."} or {"type": "...", "name": "..."}.
+- Do NOT declare dependencies, edges, ordering, or a dependsOn field.
+  Dependencies are derived by the graph engine from produces/consumes.
+
 Emit files using this exact marker format:
 ---FILE: Plans/plan1/plan1.md---
 <markdown>
 ---FILE: Plans/plan1/test1.md---
 <markdown>
+---FILE: Plans/plan1/waves/wave1/node.json---
+<json>
 
+Attempt: $attempt
 Constitution inputs follow.
 EOF
-    find "$CONSTITUTION_DIR" -maxdepth 1 -name 'C*.tex' -type f | sort | while IFS= read -r file; do
-        printf '\n===== %s =====\n' "$file"
-        cat "$file"
-    done
-} > "$TMP_DIR/prompt.md"
+        find "$CONSTITUTION_DIR" -maxdepth 1 -name 'C*.tex' -type f | sort | while IFS= read -r file; do
+            printf '\n===== %s =====\n' "$file"
+            cat "$file"
+        done
+    } > "$TMP_DIR/prompt.md"
+}
 
-AI_OUTPUT="$TMP_DIR/ai_output.txt"
-set +e
-run_phase_ai "$AI_PROVIDER" "$MODEL" "$TMP_DIR/prompt.md" "Plans/planN" > "$AI_OUTPUT"
-AI_STATUS=$?
-set -e
-if [ "$AI_STATUS" -ne 0 ]; then
+# Extract into a staging directory first: every emitted wave work-node manifest
+# must pass KGPE schema + closed-vocabulary validation BEFORE anything is
+# written into the project. Invalid or missing manifests retry the model;
+# after MAX_ATTEMPTS the run is a hard failure (exit 10), never a silent skip.
+MAX_ATTEMPTS=3
+attempt=1
+manifests_ok="false"
+while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+    build_prompt "$attempt"
+    AI_OUTPUT="$TMP_DIR/ai_output_${attempt}.txt"
+    set +e
+    run_phase_ai "$AI_PROVIDER" "$MODEL" "$TMP_DIR/prompt.md" "Plans/planN" > "$AI_OUTPUT"
+    AI_STATUS=$?
+    set -e
+    if [ "$AI_STATUS" -ne 0 ]; then
+        write_phase_result "$PROJECT_DIR" 1 "PlannerAgent" "failed" '[]' "false" >/dev/null
+        exit "$AI_STATUS"
+    fi
+
+    EXTRACT_DIR="$TMP_DIR/extract_${attempt}"
+    mkdir -p "$EXTRACT_DIR"
+    OUTPUTS_FILE="$TMP_DIR/outputs_${attempt}.txt"
+    if phase_extract_marked_files "$EXTRACT_DIR" "$AI_OUTPUT" "$OUTPUTS_FILE" \
+        && kgpe_validate_wave_manifests "$EXTRACT_DIR/Plans"; then
+        manifests_ok="true"
+        break
+    fi
+    log_warning "Phase 1 attempt $attempt: missing or invalid wave work-node manifests; retrying"
+    attempt=$((attempt + 1))
+done
+
+if [ "$manifests_ok" != "true" ]; then
     write_phase_result "$PROJECT_DIR" 1 "PlannerAgent" "failed" '[]' "false" >/dev/null
-    exit "$AI_STATUS"
+    log_error "Phase 1 failed: no valid work-node manifests after $MAX_ATTEMPTS attempts"
+    exit 10
 fi
 
-OUTPUTS_FILE="$TMP_DIR/outputs.txt"
-if ! phase_extract_marked_files "$PROJECT_DIR" "$AI_OUTPUT" "$OUTPUTS_FILE"; then
-    write_dry_run_outputs
-    cp "$AI_OUTPUT" "$PROJECT_DIR/Plans/plan1/plan1.md"
-    printf 'Plans/plan1/plan1.md\nPlans/plan1/test1.md\nPlans/plan1/decision_log.md\nPlans/plan1/waves/wave1/subplan1.md\nPlans/plan1/waves/wave1/subtest1.md\n' > "$OUTPUTS_FILE"
-fi
+# Staged output validated; copy it into the project.
+(
+    cd "$EXTRACT_DIR"
+    find . -type f -print
+) | while IFS= read -r rel_path; do
+    mkdir -p "$PROJECT_DIR/$(dirname "$rel_path")"
+    cp "$EXTRACT_DIR/$rel_path" "$PROJECT_DIR/$rel_path"
+done
 
 OUTPUTS_JSON="$(phase_outputs_json_from_file "$OUTPUTS_FILE")"
 write_phase_result "$PROJECT_DIR" 1 "PlannerAgent" "success" "$OUTPUTS_JSON" "false" >/dev/null

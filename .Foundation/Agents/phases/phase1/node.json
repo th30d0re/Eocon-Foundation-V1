@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "phase1.planner",
+  "kind": "agent",
+  "label": "Planner Agent",
+  "exec": {
+    "type": "script",
+    "path": "phase1/PlannerAgent.sh",
+    "args": ["--project-dir", "${PROJECT_DIR}", "--yolo", "--constitution-dir", "${CONSTITUTION_DIR}"]
+  },
+  "consumes": [
+    { "type": "constitution.root" },
+    { "type": "constitution.sub" }
+  ],
+  "produces": [
+    { "type": "plan.doc" },
+    { "type": "plan.test" },
+    { "type": "wave.subplan" },
+    { "type": "wave.subtest" },
+    { "type": "decision.log" }
+  ],
+  "gate": "none",
+  "retry": { "maxAttempts": 3 }
+}

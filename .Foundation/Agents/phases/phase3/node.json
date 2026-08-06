@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "phase3.optimization",
+  "kind": "agent",
+  "label": "Optimization Agent",
+  "exec": {
+    "type": "script",
+    "path": "phase3/OptimizationAgent.sh",
+    "args": ["--project-dir", "${PROJECT_DIR}", "--yolo", "--plans-dir", "${PLANS_DIR}", "--questions", "${QUESTIONS_FILE}"]
+  },
+  "consumes": [
+    { "type": "questions.doc" },
+    { "type": "decision.log" },
+    { "type": "plan.doc" },
+    { "type": "plan.test" },
+    { "type": "wave.subplan" },
+    { "type": "wave.subtest" }
+  ],
+  "produces": [
+    { "type": "wave.unittest" },
+    { "type": "decision.log" }
+  ],
+  "gate": "none",
+  "retry": { "maxAttempts": 3 }
+}

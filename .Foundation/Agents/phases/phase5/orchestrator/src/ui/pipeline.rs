@@ -6,6 +6,7 @@ use ratatui::{
 
 use crate::app::{App, Phase, StageStatus};
 use crate::pipeline_engine::{PhaseStatus, PipelinePhase};
+use crate::kgpe::NodeState;
 
 /// Render the pipeline stage tracker.
 /// When bottom is expanded (Shift+Tab), shows the unified build+test pipeline.
@@ -160,6 +161,40 @@ fn stage_label(stage: &crate::app::PipelineStage) -> String {
 fn foundation_pipeline_tracker(app: &App) -> Paragraph<'_> {
     let mut spans: Vec<Span<'_>> = Vec::new();
 
+    if let Some(ref graph) = app.graph_engine {
+        for (stage_idx, stage) in graph.report.stages.iter().enumerate() {
+            if stage_idx > 0 {
+                spans.push(Span::styled(" -> ", Style::default().fg(Color::DarkGray)));
+            }
+            for (node_idx, id) in stage.iter().enumerate() {
+                if node_idx > 0 {
+                    spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+                }
+                let node = graph.nodes.iter().find(|node| &node.id == id);
+                let label = node.map_or(id.as_str(), |node| node.label.as_str());
+                let status = graph.states.get(id).copied().unwrap_or(NodeState::Pending);
+                let active = app.active_graph_node.as_deref() == Some(id.as_str());
+                let (icon, color) = node_status_icon_color(status, app.tick_count);
+                let style = if active || status == NodeState::AwaitingApproval {
+                    Style::default()
+                        .fg(color)
+                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(color)
+                };
+                spans.push(Span::styled(format!("{} {}", icon, label), style));
+            }
+        }
+        return Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .title(" Foundation Agent Graph ")
+                .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+    }
+
     for idx in 0..=5 {
         if idx > 0 {
             spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
@@ -199,6 +234,22 @@ fn foundation_pipeline_tracker(app: &App) -> Paragraph<'_> {
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
+}
+
+fn node_status_icon_color(status: NodeState, tick_count: u64) -> (&'static str, Color) {
+    match status {
+        NodeState::Pending => ("○", Color::DarkGray),
+        NodeState::Ready => ("◇", Color::Cyan),
+        NodeState::Running => {
+            let frames = &["◐", "◓", "◑", "◒"];
+            (frames[tick_count as usize % frames.len()], Color::Yellow)
+        }
+        NodeState::AwaitingApproval => ("||", Color::Magenta),
+        NodeState::Succeeded => ("+", Color::Green),
+        NodeState::Failed => ("x", Color::Red),
+        NodeState::HumanIntervention => ("!", Color::Red),
+        NodeState::Skipped => ("-", Color::Gray),
+    }
 }
 
 fn phase_status_icon_color(status: PhaseStatus, tick_count: u64) -> (&'static str, Color) {

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "phase4.stages",
+  "kind": "agent",
+  "label": "Stages Agent",
+  "exec": {
+    "type": "script",
+    "path": "phase4/StagesAgent.sh",
+    "args": ["--project-dir", "${PROJECT_DIR}", "--yolo", "--plans-dir", "${PLANS_DIR}"]
+  },
+  "consumes": [
+    { "type": "plan.doc" },
+    { "type": "wave.subplan" },
+    { "type": "wave.unittest" }
+  ],
+  "produces": [
+    { "type": "stages.graph" }
+  ],
+  "gate": "none",
+  "retry": { "maxAttempts": 3 }
+}

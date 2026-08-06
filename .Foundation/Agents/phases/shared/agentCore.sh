@@ -239,6 +239,144 @@ phase_outputs_json_from_file() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# KGPE node-manifest helpers (KGPE tech-plan §3).
+# Edges are derived by the graph engine from typed produces/consumes
+# declarations; manifests never declare edges or dependency lists.
+# ---------------------------------------------------------------------------
+
+# Closed artifact-type vocabulary (tech-plan §3.1). Additions require amending
+# the tech plan; anything outside this list is a hard validation failure.
+KGPE_ARTIFACT_TYPES="constitution.root constitution.sub plan.doc plan.test wave.subplan wave.subtest wave.unittest questions.doc decision.log stages.graph code.module test.result guide.doc"
+
+kgpe_is_artifact_type() {
+    local artifact_type="$1"
+    local known
+    for known in $KGPE_ARTIFACT_TYPES; do
+        if [ "$artifact_type" = "$known" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Validate one node manifest against tech-plan §3.2 and the §3.1 vocabulary.
+# Fails loudly: no repair, no fallback. Returns 0 when valid, 1 otherwise.
+kgpe_validate_manifest() {
+    local file="$1"
+    local artifact_type
+
+    if [ ! -f "$file" ]; then
+        log_error "KGPE manifest not found: $file"
+        return 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        log_error "jq is required to validate KGPE manifests"
+        return 1
+    fi
+    if ! jq -e '
+        def refs_ok: all(.[]; (.type | type == "string") and ((.name? == null) or (.name | type == "string")));
+        (.schemaVersion == 1)
+        and (.id | type == "string" and length > 0)
+        and (.kind == "agent" or .kind == "work")
+        and (.label | type == "string" and length > 0)
+        and (.exec | type == "object")
+        and (.exec.type == "script" or .exec.type == "wave")
+        and (if .exec.type == "script"
+             then (.exec.path | type == "string" and length > 0)
+             else (.exec.planPath | type == "string" and length > 0)
+             end)
+        and (.consumes | type == "array")
+        and (.produces | type == "array")
+        and (.consumes | refs_ok)
+        and (.produces | refs_ok)
+        and (.gate == "none" or .gate == "human")
+        and ((.retry == null) or ((.retry.maxAttempts | type == "number") and (.retry.maxAttempts >= 1)))
+        and ((has("edges") or has("dependsOn") or has("dependencies")) | not)
+    ' "$file" >/dev/null 2>&1; then
+        log_error "KGPE manifest failed schema validation: $file"
+        return 1
+    fi
+
+    while IFS= read -r artifact_type; do
+        [ -n "$artifact_type" ] || continue
+        if ! kgpe_is_artifact_type "$artifact_type"; then
+            log_error "KGPE manifest declares unknown artifact type '$artifact_type': $file"
+            return 1
+        fi
+    done <<KGPE_TYPES_EOF
+$(jq -r '.consumes[].type, .produces[].type' "$file" 2>/dev/null)
+KGPE_TYPES_EOF
+
+    return 0
+}
+
+# Print the paths of all work-node manifests under a Plans directory.
+kgpe_collect_wave_manifests() {
+    local plans_dir="$1"
+    [ -d "$plans_dir" ] || return 1
+    find "$plans_dir" -type f -path '*/waves/wave*/node.json' | sort
+}
+
+# Validate every work-node manifest under a Plans directory:
+# at least one manifest, every manifest schema/vocabulary valid, every wave
+# carrying a subplan also carrying a node.json, and node ids unique.
+kgpe_validate_wave_manifests() {
+    local plans_dir="$1"
+    local invalid=0
+    local count=0
+    local manifest
+    local subplan
+    local wave_dir
+    local duplicates
+
+    if [ ! -d "$plans_dir" ]; then
+        log_error "KGPE: Plans directory not found: $plans_dir"
+        return 1
+    fi
+
+    while IFS= read -r manifest; do
+        [ -n "$manifest" ] || continue
+        count=$((count + 1))
+        if ! kgpe_validate_manifest "$manifest"; then
+            invalid=$((invalid + 1))
+        fi
+    done <<KGPE_MANIFESTS_EOF
+$(kgpe_collect_wave_manifests "$plans_dir")
+KGPE_MANIFESTS_EOF
+
+    while IFS= read -r subplan; do
+        [ -n "$subplan" ] || continue
+        wave_dir="$(dirname "$subplan")"
+        if [ ! -f "$wave_dir/node.json" ]; then
+            log_error "KGPE wave is missing node.json: $wave_dir"
+            invalid=$((invalid + 1))
+        fi
+    done <<KGPE_SUBPLANS_EOF
+$(find "$plans_dir" -type f -path '*/waves/wave*/subplan*.md' 2>/dev/null | sort)
+KGPE_SUBPLANS_EOF
+
+    if [ "$count" -eq 0 ]; then
+        log_error "KGPE: no work-node manifests found under: $plans_dir"
+        return 1
+    fi
+    if [ "$invalid" -gt 0 ]; then
+        return 1
+    fi
+
+    duplicates="$(kgpe_collect_wave_manifests "$plans_dir" | while IFS= read -r manifest; do
+        [ -n "$manifest" ] && jq -r '.id' "$manifest"
+    done | sort | uniq -d)"
+    if [ -n "$duplicates" ]; then
+        printf '%s\n' "$duplicates" | while IFS= read -r dup_id; do
+            log_error "KGPE: duplicate node id '$dup_id' under: $plans_dir"
+        done
+        return 1
+    fi
+
+    return 0
+}
+
 phase_extract_marked_files() {
     local project_dir="$1"
     local ai_output_file="$2"

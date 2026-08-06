@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# Purpose: Phase 4 Stages Agent - dependency DAG to stages.md and stages.json.
+# Purpose: Phase 4 Stages Agent - collect and validate Phase 1 work-node manifests, emit stages.json manifest set.
 # Exit Codes: 0 success/dry-run/help, 10 failed after retries, 11 misconfiguration, 20 human intervention.
+#
+# Phase 4 no longer asks a model to invent a DAG. Per the KGPE tech plan
+# (§2 decision 1, §3.3), edges are derived by the graph engine from typed
+# produces/consumes declarations and are never authored. Phase 4's job is to
+# collect the work-node manifests emitted by Phase 1, validate them against
+# the §3.2 schema and the §3.1 closed vocabulary, and emit Plans/stages.json
+# as a manifest set (the nodes). The KGPE engine (phase5/orchestrator
+# src/kgpe) derives stage layering and the critical path from that set during
+# graph validation (tech-plan §4); until it is wired in (Phase C), Phase 4
+# succeeds having emitted validated manifests.
 
 set -euo pipefail
 
@@ -26,7 +36,7 @@ fi
 # shellcheck disable=SC1090
 source "$CORE_LIB"
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 PROJECT_DIR=""
 AI_PROVIDER="claude"
 MODEL=""
@@ -54,6 +64,11 @@ Contract flags:
 
 Phase 4 input flags:
   --plans-dir <dir>      Plans directory (default: <project>/Plans)
+
+Phase 4 collects the work-node manifests (Plans/planN/waves/waveM/node.json)
+emitted by Phase 1, validates them against the KGPE schema and closed
+artifact-type vocabulary, and emits Plans/stages.json as a manifest set.
+Edges are derived by the KGPE engine, never authored here.
 USAGE
 }
 
@@ -97,20 +112,29 @@ write_dry_run_outputs() {
 
 <!-- DRY-RUN PLACEHOLDER -->
 
-## Stage 1 (Parallel)
-- plan1/wave1
+## Work Nodes
+- plan1.wave1 (DRY-RUN PLACEHOLDER)
 
-## Critical Path
-plan1
+## Stage Layering and Critical Path
+<!-- DRY-RUN PLACEHOLDER: derived by the KGPE engine from the manifest set -->
 EOF
     cat > "$PROJECT_DIR/Plans/stages.json" <<'EOF'
 {
   "schemaVersion": 1,
-  "stages": [
-    { "stage": 1, "parallel": true, "waves": ["plan1/wave1"] }
-  ],
-  "criticalPath": ["plan1"],
-  "independentWaves": ["plan1/wave1"]
+  "kind": "manifestSet",
+  "nodes": [
+    {
+      "schemaVersion": 1,
+      "id": "plan1.wave1",
+      "kind": "work",
+      "label": "DRY-RUN PLACEHOLDER wave",
+      "exec": { "type": "wave", "planPath": "Plans/plan1/waves/wave1" },
+      "consumes": [],
+      "produces": [ { "type": "code.module", "name": "dry-run-placeholder" } ],
+      "gate": "none",
+      "retry": { "maxAttempts": 3 }
+    }
+  ]
 }
 EOF
 }
@@ -122,112 +146,48 @@ if [ "$DRY_RUN" = "true" ]; then
     exit 0
 fi
 
-if [ ! -d "$PLANS_DIR" ] || ! find "$PLANS_DIR" -type f \( -name 'plan*.md' -o -name 'subplan*.md' \) | grep -q .; then
-    log_error "Phase 4 requires plan files in: $PLANS_DIR"
-    exit 11
-fi
-
 if ! command -v jq >/dev/null 2>&1; then
-    log_error "Phase 4 requires jq to validate Plans/stages.json"
+    log_error "Phase 4 requires jq to validate and emit Plans/stages.json"
     exit 11
 fi
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/foundation_phase4_XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
+if [ ! -d "$PLANS_DIR" ] || ! kgpe_collect_wave_manifests "$PLANS_DIR" | grep -q .; then
+    log_error "Phase 4 requires work-node manifests under: $PLANS_DIR (Phase 1 emits them)"
+    exit 11
+fi
 
-build_prompt() {
-    local attempt="$1"
-    {
-        cat <<EOF
-You are the Foundation Phase 4 Stages Agent.
-
-Read all plans and waves, build the dependency DAG, and emit:
-1. Plans/stages.md in the Foundation Constitution Article II Section 3 format:
-   # Execution Stages, Stage N (Parallel), Critical Path.
-2. Plans/stages.json matching exactly:
-{
-  "schemaVersion": 1,
-  "stages": [
-    { "stage": 1, "parallel": true, "waves": ["plan1/wave1"] }
-  ],
-  "criticalPath": ["plan1", "plan2"],
-  "independentWaves": ["plan3/wave1"]
-}
-
-Return stages.json between these sentinel markers:
----STAGES_JSON_START---
-<valid JSON>
----STAGES_JSON_END---
-
-If also emitting files, use:
----FILE: Plans/stages.md---
-<markdown>
-
-Attempt: $attempt
-Plan inputs follow.
-EOF
-        find "$PLANS_DIR" -type f \( -name '*.md' \) | sort | while IFS= read -r file; do
-            printf '\n===== %s =====\n' "$file"
-            cat "$file"
-        done
-    } > "$TMP_DIR/prompt.md"
-}
-
-extract_json() {
-    local source_file="$1"
-    local target_file="$2"
-    awk '/^---STAGES_JSON_START---$/ { capture=1; next } /^---STAGES_JSON_END---$/ { capture=0 } capture { print }' "$source_file" > "$target_file"
-    if [ ! -s "$target_file" ]; then
-        cp "$source_file" "$target_file"
-    fi
-}
-
-attempt=1
-valid_json="false"
-while [ "$attempt" -le 2 ]; do
-    build_prompt "$attempt"
-    AI_OUTPUT="$TMP_DIR/ai_output_${attempt}.txt"
-    set +e
-    run_phase_ai "$AI_PROVIDER" "$MODEL" "$TMP_DIR/prompt.md" "Plans/stages.md and stages.json" > "$AI_OUTPUT"
-    AI_STATUS=$?
-    set -e
-    if [ "$AI_STATUS" -ne 0 ]; then
-        write_phase_result "$PROJECT_DIR" 4 "StagesAgent" "failed" '[]' "false" >/dev/null
-        exit "$AI_STATUS"
-    fi
-
-    extract_json "$AI_OUTPUT" "$TMP_DIR/stages.json"
-    if jq empty "$TMP_DIR/stages.json" >/dev/null 2>&1; then
-        valid_json="true"
-        break
-    fi
-    attempt=$((attempt + 1))
-done
-
-if [ "$valid_json" != "true" ]; then
+# Validate the manifest set: schema, closed vocabulary, per-wave coverage,
+# unique ids. Anything invalid is a hard failure, never a silent repair.
+if ! kgpe_validate_wave_manifests "$PLANS_DIR"; then
     write_phase_result "$PROJECT_DIR" 4 "StagesAgent" "failed" '[]' "false" >/dev/null
-    log_error "Phase 4 failed: invalid stages.json after 2 attempts"
+    log_error "Phase 4 failed: invalid work-node manifests under $PLANS_DIR"
     exit 10
 fi
 
 mkdir -p "$PROJECT_DIR/Plans"
-cp "$TMP_DIR/stages.json" "$PROJECT_DIR/Plans/stages.json"
-OUTPUTS_FILE="$TMP_DIR/outputs.txt"
-if ! phase_extract_marked_files "$PROJECT_DIR" "$AI_OUTPUT" "$OUTPUTS_FILE" || [ ! -f "$PROJECT_DIR/Plans/stages.md" ]; then
-    cat > "$PROJECT_DIR/Plans/stages.md" <<EOF
-# Execution Stages
+STAGES_JSON="$PROJECT_DIR/Plans/stages.json"
+kgpe_collect_wave_manifests "$PLANS_DIR" | tr '\n' '\0' \
+    | xargs -0 jq -s '{schemaVersion: 1, kind: "manifestSet", nodes: [.[]]}' > "$STAGES_JSON"
 
-Generated by Phase 4 Stages Agent.
-
-## Stage 1 (Parallel)
-See Plans/stages.json.
-
-## Critical Path
-See Plans/stages.json.
-EOF
-    printf 'Plans/stages.md\n' > "$OUTPUTS_FILE"
+if ! jq -e '.schemaVersion == 1 and (.nodes | type == "array") and (.nodes | length > 0)' "$STAGES_JSON" >/dev/null 2>&1; then
+    write_phase_result "$PROJECT_DIR" 4 "StagesAgent" "failed" '[]' "false" >/dev/null
+    log_error "Phase 4 failed: could not emit a valid manifest set"
+    exit 10
 fi
-printf 'Plans/stages.json\n' >> "$OUTPUTS_FILE"
+
+{
+    printf '# Execution Stages\n\n'
+    printf 'Work-node manifest set collected and validated by the Phase 4 Stages Agent.\n'
+    printf 'Edges are derived by the KGPE engine from typed produces/consumes declarations; none are authored here.\n\n'
+    printf '## Work Nodes\n\n'
+    jq -r '.nodes[] | "- `\(.id)` - \(.label) (`\(.exec.planPath // .exec.path // "n/a")`)"' "$STAGES_JSON"
+    printf '\n## Stage Layering and Critical Path\n\n'
+    printf 'Computed by the KGPE engine from this manifest set during graph validation; Phase 4 emits validated nodes only.\n'
+} > "$PROJECT_DIR/Plans/stages.md"
+
+OUTPUTS_FILE="$(mktemp "${TMPDIR:-/tmp}/foundation_phase4_outputs_XXXXXX")"
+trap 'rm -f "$OUTPUTS_FILE"' EXIT
+printf 'Plans/stages.md\nPlans/stages.json\n' > "$OUTPUTS_FILE"
 
 OUTPUTS_JSON="$(phase_outputs_json_from_file "$OUTPUTS_FILE")"
 write_phase_result "$PROJECT_DIR" 4 "StagesAgent" "success" "$OUTPUTS_JSON" "false" >/dev/null

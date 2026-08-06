@@ -113,9 +113,10 @@ ORCHESTRATOR enforces the gate — agents never block waiting for a human.
 
 ## 6. Orchestrator Obligations
 
-- Runs phases strictly in order 0→5 unless the user pins a phase; phase N+1 may
-  start only when phase N's `result.json` has `status: success` AND any
-  `requiresApproval` gate has been approved by the human (`/approve`).
+- Runs nodes in dependency-derived order according to the edge derivation rule in
+  `../../.Planning/Plans/KGPE_Graph_Engine/tech-plan.md` §3.3. A node may run when all
+  predecessors are `Succeeded` or `Skipped`; any `requiresApproval` gate must be approved by
+  the human (`/approve`) before successors become ready.
 - Persists pipeline state to `<project>/Artifacts/pipeline_state.json`
   (`schemaVersion`, current phase, per-phase status, approvals, timestamps) and
   can resume from it after restart.

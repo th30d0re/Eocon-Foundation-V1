@@ -1,0 +1,44 @@
+[
+  {
+    "schemaVersion": 1,
+    "id": "phase5.build",
+    "kind": "agent",
+    "label": "Build Agent",
+    "exec": {
+      "type": "script",
+      "path": "phase5/BuildAgent.sh",
+      "args": ["--plans-dir", "${PLANS_DIR}", "--prompt", "${PROMPT}", "--yolo"]
+    },
+    "consumes": [
+      { "type": "stages.graph" },
+      { "type": "wave.subplan" },
+      { "type": "wave.subtest" },
+      { "type": "wave.unittest" }
+    ],
+    "produces": [
+      { "type": "code.module" },
+      { "type": "guide.doc" }
+    ],
+    "gate": "none",
+    "retry": { "maxAttempts": 3 }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "phase5.test",
+    "kind": "agent",
+    "label": "Test Agent",
+    "exec": {
+      "type": "script",
+      "path": "phase5/testAgent.sh",
+      "args": ["--project-dir", "${PROJECT_DIR}", "--yolo"]
+    },
+    "consumes": [
+      { "type": "code.module" }
+    ],
+    "produces": [
+      { "type": "test.result" }
+    ],
+    "gate": "none",
+    "retry": { "maxAttempts": 3 }
+  }
+]

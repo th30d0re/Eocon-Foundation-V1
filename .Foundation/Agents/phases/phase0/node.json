@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "phase0.constitution",
+  "kind": "agent",
+  "label": "Constitution Agent",
+  "exec": {
+    "type": "script",
+    "path": "phase0/ConstitutionAgent.sh",
+    "args": ["--project-dir", "${PROJECT_DIR}", "--yolo", "--prompt", "${PROMPT}"]
+  },
+  "consumes": [],
+  "produces": [
+    { "type": "constitution.root" },
+    { "type": "constitution.sub" }
+  ],
+  "gate": "human",
+  "retry": { "maxAttempts": 3 }
+}

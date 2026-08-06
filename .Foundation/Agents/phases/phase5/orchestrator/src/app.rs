@@ -12,8 +12,9 @@ use crate::pipeline_engine::{
     approve_phase, apply_phase_outcome, awaiting_approval_phase, can_start_phase,
     find_latest_result_json, format_status_summary, map_exit_code, parse_result_json,
     pipeline_state_path, reject_phase, save_pipeline_state, skip_phase, start_phase,
-    PipelineRunState,
+    format_graph, format_graph_report, graph_state_path, render_graph_mermaid, PipelineRunState,
 };
+use crate::kgpe::{save_graph_state, GraphEngine, NodeState};
 use crate::pty_screen::PtyScreen;
 use crate::ui::theme::Voice;
 
@@ -26,6 +27,58 @@ pub enum Phase {
     Complete,
     Failed,
     Aborted,
+}
+
+#[cfg(test)]
+mod graph_command_tests {
+    use super::*;
+    use crate::kgpe::{ArtifactRef, ArtifactType, ExecSpec, Gate, Node, NodeKind, RetrySpec};
+
+    fn app_with_graph() -> App {
+        let mut app = App::new(false);
+        app.graph_engine = Some(
+            GraphEngine::new(vec![Node {
+                schema_version: 1,
+                id: "phase0.test".into(),
+                kind: NodeKind::Agent,
+                label: "Test node".into(),
+                exec: ExecSpec::Script {
+                    path: "phase0/Test.sh".into(),
+                    args: vec![],
+                },
+                consumes: vec![],
+                produces: vec![ArtifactRef::unnamed(ArtifactType::ConstitutionRoot)],
+                gate: Gate::None,
+                retry: RetrySpec { max_attempts: 1 },
+            }])
+            .unwrap(),
+        );
+        app
+    }
+
+    #[test]
+    fn graph_commands_are_in_picker_help_and_dispatch() {
+        assert!(SLASH_COMMANDS.iter().any(|command| command.name == "/graph"));
+        let mut app = app_with_graph();
+
+        for command in ["/graph", "/graph validate", "/graph render", "/help"] {
+            app.handle_command(command);
+        }
+
+        let messages = app
+            .interaction
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(messages.iter().any(|text| text.contains("Foundation Agent Graph:")));
+        assert!(messages.iter().any(|text| text.contains("Graph validation: valid")));
+        assert!(messages.iter().any(|text| text.starts_with("graph TD")));
+        let help = messages.last().unwrap();
+        assert!(help.contains("/graph validate"));
+        assert!(help.contains("/graph render"));
+        assert!(help.contains("/pipeline"));
+        assert!(help.contains("/phase <n>"));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +218,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "/happy-only", description: "Toggle happy-path-only mode", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/skip", description: "Skip current phase", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/pipeline", description: "Run or inspect the full Foundation pipeline", takes_arg: true, arg_hint: "[status]" },
+    SlashCommand { name: "/graph", description: "Inspect or validate the derived agent graph", takes_arg: true, arg_hint: "[validate|render]" },
     SlashCommand { name: "/phase", description: "Run a single pipeline phase", takes_arg: true, arg_hint: "<n> [--force]" },
     SlashCommand { name: "/approve", description: "Approve an awaiting-approval gate", takes_arg: false, arg_hint: "" },
     SlashCommand { name: "/reject", description: "Reject an awaiting-approval gate", takes_arg: false, arg_hint: "" },
@@ -265,6 +319,10 @@ pub struct App {
     pub active_agent: ActiveAgentKind,
     /// Full 0-5 pipeline state.
     pub pipeline_state: Option<PipelineRunState>,
+    /// Runtime state for the manifest-derived seven-node agent graph.
+    pub graph_engine: Option<GraphEngine>,
+    /// Graph node currently represented by the running child process.
+    pub active_graph_node: Option<String>,
     /// Whether the full pipeline is currently auto-running.
     pub pipeline_running: bool,
     /// For phase 5, tracks whether we are running BuildAgent or TestAgent.
@@ -379,6 +437,8 @@ impl App {
             project_dir: cwd.clone(),
             active_agent: ActiveAgentKind::None,
             pipeline_state: None,
+            graph_engine: None,
+            active_graph_node: None,
             pipeline_running: false,
             pipeline_phase5_step: None,
             pipeline_single_phase_target: None,
@@ -1002,6 +1062,18 @@ impl App {
             .as_deref()
             .and_then(|p| parse_result_json(p).ok());
 
+        if let Some(node_id) = self.active_graph_node.take() {
+            if let Some(ref mut graph) = self.graph_engine {
+                let _ = graph.apply_exit_code(&node_id, code);
+                if result.as_ref().is_some_and(|value| value.requires_approval)
+                    && graph.states.get(&node_id) == Some(&NodeState::Succeeded)
+                {
+                    graph.states.insert(node_id, NodeState::AwaitingApproval);
+                }
+                let _ = save_graph_state(&graph_state_path(&self.project_dir), graph);
+            }
+        }
+
         if let Some(ref mut state) = self.pipeline_state {
             let (messages, stop) = apply_phase_outcome(
                 state,
@@ -1030,15 +1102,19 @@ impl App {
     fn handle_pipeline_build_exited(&mut self, code: i32) {
         self.agent_state = AgentState::Idle;
         self.command_started = None;
+        if let Some(node_id) = self.active_graph_node.take() {
+            if let Some(ref mut graph) = self.graph_engine {
+                let _ = graph.apply_exit_code(&node_id, code);
+                let _ = save_graph_state(&graph_state_path(&self.project_dir), graph);
+            }
+        }
         if code == 0 {
             self.interaction.push(InteractionMessage {
                 voice: Voice::Agent,
-                text: "Pipeline phase 5: BuildAgent passed. Starting TestAgent...".to_string(),
+                text: "Pipeline graph node phase5.build passed.".to_string(),
             });
-            self.pipeline_phase5_step = Some(Phase5Step::Test);
+            self.pipeline_phase5_step = None;
             self.active_agent = ActiveAgentKind::None;
-            // Queue TestAgent spawn in the main loop, preserving pipeline context.
-            self.spawn_request = Some(SpawnRequest::Test);
         } else {
             self.active_agent = ActiveAgentKind::None;
             self.pipeline_phase5_step = None;
@@ -1065,6 +1141,13 @@ impl App {
         self.agent_state = AgentState::Idle;
         self.command_started = None;
         self.pipeline_phase5_step = None;
+
+        if let Some(node_id) = self.active_graph_node.take() {
+            if let Some(ref mut graph) = self.graph_engine {
+                let _ = graph.apply_exit_code(&node_id, code);
+                let _ = save_graph_state(&graph_state_path(&self.project_dir), graph);
+            }
+        }
 
         if let Some(ref mut state) = self.pipeline_state {
             let exit = map_exit_code(code);
@@ -1093,7 +1176,12 @@ impl App {
     }
 
     fn show_pipeline_status(&mut self) {
-        if let Some(ref state) = self.pipeline_state {
+        if let Some(ref graph) = self.graph_engine {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Agent,
+                text: format_graph(graph),
+            });
+        } else if let Some(ref state) = self.pipeline_state {
             self.interaction.push(InteractionMessage {
                 voice: Voice::Agent,
                 text: format_status_summary(state),
@@ -1121,16 +1209,39 @@ impl App {
             });
             return;
         }
+        if self.graph_engine.is_none() {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Error,
+                text: "Agent graph is unavailable; correct the named startup validation error before running the pipeline.".to_string(),
+            });
+            return;
+        }
         if self.pipeline_state.is_none() {
             self.pipeline_state = Some(PipelineRunState::with_started_now());
         }
         self.pipeline_running = true;
-        let state = self.pipeline_state.as_ref().unwrap();
-        let resume = crate::pipeline_engine::resume_phase_index(state);
+        let ready = self.graph_engine.as_ref().unwrap().ready_set();
         self.interaction.push(InteractionMessage {
             voice: Voice::Agent,
-            text: format!("Starting Foundation pipeline from phase {}...", resume),
+            text: format!("Starting Foundation graph pipeline; ready nodes: {}", ready.join(", ")),
         });
+    }
+
+    fn show_graph(&mut self, operation: Option<&str>) {
+        let Some(ref graph) = self.graph_engine else {
+            self.interaction.push(InteractionMessage {
+                voice: Voice::Error,
+                text: "Agent graph is unavailable.".to_string(),
+            });
+            return;
+        };
+        let text = match operation {
+            None => format_graph(graph),
+            Some("validate") => format_graph_report(&crate::kgpe::validate_graph(&graph.nodes)),
+            Some("render") => render_graph_mermaid(graph),
+            Some(other) => format!("Unknown /graph operation '{other}'. Use /graph, /graph validate, or /graph render."),
+        };
+        self.interaction.push(InteractionMessage { voice: Voice::Agent, text });
     }
 
     fn run_single_phase(&mut self, args: &[&str]) {
@@ -1215,6 +1326,26 @@ impl App {
             });
             return;
         };
+        if let Some(ref mut graph) = self.graph_engine {
+            if let Some(node_id) = graph
+                .states
+                .iter()
+                .find_map(|(id, status)| (*status == NodeState::AwaitingApproval).then(|| id.clone()))
+            {
+                if approve {
+                    if let Err(error) = graph.approve(&node_id) {
+                        self.interaction.push(InteractionMessage {
+                            voice: Voice::Error,
+                            text: error.to_string(),
+                        });
+                        return;
+                    }
+                } else {
+                    graph.states.insert(node_id, NodeState::Failed);
+                }
+                let _ = save_graph_state(&graph_state_path(&self.project_dir), graph);
+            }
+        }
         let result = if approve {
             approve_phase(state, idx)
         } else {
@@ -1517,6 +1648,7 @@ impl App {
                     self.start_pipeline();
                 }
             }
+            "/graph" => self.show_graph(parts.next()),
             "/phase" => {
                 let rest: Vec<&str> = parts.collect();
                 self.run_single_phase(&rest);
@@ -1572,7 +1704,7 @@ impl App {
             "/help" => {
                 self.interaction.push(InteractionMessage {
                     voice: Voice::Agent,
-                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /test-from <s>  — start TestAgent from stage\n  /test-stage <s> — run a single TestAgent stage\n  /pipeline       — run full Foundation pipeline 0→5\n  /pipeline status— show pipeline status\n  /phase <n>      — run a single pipeline phase (optionally --force)\n  /approve        — approve an awaiting-approval gate\n  /reject         — reject an awaiting-approval gate\n  /skip-phase <n> — skip a pipeline phase\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /coverage <n>   — set target coverage %\n  /strategy <s>   — set test strategy (priority|coverage|balanced|happy-only)\n  /files <p>      — set test file scope pattern\n  /happy-only     — toggle happy-path-only mode\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: anthropic (default, Claude Fable 5), moonshot, openai, codex, cursor, google, ollama, openrouter".to_string(),
+                    text: "Available commands:\n  /build          — start BuildAgent\n  /test           — start TestAgent\n  /test-from <s>  — start TestAgent from stage\n  /test-stage <s> — run a single TestAgent stage\n  /pipeline       — run the dependency-derived Foundation graph\n  /pipeline status— show pipeline status\n  /graph          — show graph node statuses\n  /graph validate — show graph validation report\n  /graph render   — render the graph as Mermaid\n  /phase <n>      — run a single pipeline phase (optionally --force)\n  /approve        — approve an awaiting-approval gate\n  /reject         — reject an awaiting-approval gate\n  /skip-phase <n> — skip a pipeline phase\n  /provider <p>   — switch AI provider\n  /model <m>      — switch AI model\n  /coverage <n>   — set target test coverage %\n  /strategy <s>   — set test strategy (priority|coverage|balanced|happy-only)\n  /files <p>      — set test file scope pattern\n  /happy-only     — toggle happy-path-only mode\n  /skip           — skip current phase\n  /apply          — apply pending AI-suggested changes\n  /discard        — discard pending AI-suggested changes\n  /quit           — exit orchestrator\n  /yes            — confirm re-run\n  /no             — abort\n  --project <p>   — set project\n  --scheme <s>    — set scheme\n  --yolo          — enable yolo mode\n  --verbose       — toggle verbose\n  /help           — show this message\n  /status         — show current status\n\n  Providers: anthropic (default, Claude Fable 5), moonshot, openai, codex, cursor, google, ollama, openrouter".to_string(),
                 });
             }
             "/artifacts" => {

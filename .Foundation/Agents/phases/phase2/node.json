@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "phase2.question",
+  "kind": "agent",
+  "label": "Question Agent",
+  "exec": {
+    "type": "script",
+    "path": "phase2/QuestionAgent.sh",
+    "args": ["--project-dir", "${PROJECT_DIR}", "--yolo", "--plans-dir", "${PLANS_DIR}"]
+  },
+  "consumes": [
+    { "type": "plan.doc" },
+    { "type": "wave.subplan" }
+  ],
+  "produces": [
+    { "type": "questions.doc" },
+    { "type": "decision.log" }
+  ],
+  "gate": "none",
+  "retry": { "maxAttempts": 3 }
+}

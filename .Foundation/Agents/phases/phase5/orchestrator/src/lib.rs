@@ -1,13 +1,22 @@
 pub mod action;
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod agents;
+#[allow(clippy::needless_bool_assign)]
 pub mod app;
 pub mod apply;
+#[allow(clippy::manual_flatten)]
 pub mod chat;
+#[allow(clippy::unnecessary_map_or)]
 pub mod detect;
 pub mod event;
+pub mod kgpe;
+#[allow(clippy::manual_is_multiple_of)]
 pub mod mock;
+#[allow(clippy::manual_is_multiple_of, clippy::unnecessary_map_or)]
 pub mod pipeline_engine;
+#[allow(clippy::collapsible_match, clippy::needless_range_loop)]
 pub mod pty_screen;
+#[allow(clippy::manual_is_multiple_of, clippy::too_many_arguments)]
 pub mod startup;
 pub mod tui;
 pub mod ui;
@@ -23,10 +32,11 @@ use crate::agents::runner::{kill_child, spawn, AgentCmd, RunnerMsg};
 use crate::agents::{build_agent, test_agent};
 use crate::app::{ActiveAgentKind, App, AgentState, ApplyPhase, PaneLayout, Phase, Phase5Step, SpawnRequest};
 use crate::pipeline_engine::{
-    apply_phase_outcome, detect_project_dir, load_pipeline_state, phase_agent_cmd,
-    pipeline_state_path, save_pipeline_state, start_phase, AgentExitStatus, PipelinePhase,
-    SpawnTarget,
+    apply_phase_outcome, detect_project_dir, graph_state_path, load_agent_graph,
+    load_pipeline_state, node_agent_cmd, node_phase, pipeline_state_path,
+    save_pipeline_state, start_phase, AgentExitStatus, SpawnTarget,
 };
+use crate::kgpe::{load_graph_state, save_graph_state, NodeState};
 use crate::apply::parse_changes;
 use crate::event::EventHandler;
 use crate::tui::init_terminal;
@@ -234,18 +244,42 @@ pub fn run(config: Config) -> Result<()> {
     app.artifacts_dir = config.artifacts_dir.clone();
     app.project_dir = detect_project_dir(&app.cwd);
 
+    let phases_dir_for_graph = phases_dir(&config.agents_dir);
+    let persisted_graph = graph_state_path(&app.project_dir);
+    let graph_result = match load_agent_graph(&phases_dir_for_graph) {
+        Ok(manifest_graph) if persisted_graph.is_file() => {
+            load_graph_state(&persisted_graph)
+                .map_err(|error| error.to_string())
+                .and_then(|persisted| {
+                    if persisted.nodes == manifest_graph.nodes {
+                        Ok(persisted)
+                    } else {
+                        Err(format!(
+                            "persisted graph {} does not match the current agent manifests",
+                            persisted_graph.display()
+                        ))
+                    }
+                })
+        }
+        Ok(manifest_graph) => Ok(manifest_graph),
+        Err(error) => Err(error),
+    };
+    match graph_result {
+        Ok(graph) => app.graph_engine = Some(graph),
+        Err(error) => app.interaction.push(crate::app::InteractionMessage {
+            voice: crate::ui::theme::Voice::Error,
+            text: format!("Agent graph startup validation failed: {error}"),
+        }),
+    }
+
     // Persisted pipeline state path (reused for every transition).
     let pipeline_state_path = pipeline_state_path(&app.project_dir);
 
     // Offer to resume a persisted pipeline if one exists.
     if let Some(state) = load_pipeline_state(&pipeline_state_path) {
-        let resume_idx = crate::pipeline_engine::resume_phase_index(&state);
         app.interaction.push(crate::app::InteractionMessage {
             voice: crate::ui::theme::Voice::Agent,
-            text: format!(
-                "Saved pipeline state found (resume from phase {}). Type /pipeline to resume.",
-                resume_idx
-            ),
+            text: "Legacy pipeline_state.json found; it is retained as a compatibility projection while graph_state.json controls resume scheduling.".to_string(),
         });
         app.pipeline_state = Some(state);
     }
@@ -410,7 +444,26 @@ pub fn run(config: Config) -> Result<()> {
             if let Some(idx) = app.pipeline_single_phase_target.take() {
                 let provider = app.current_provider.as_deref();
                 let phases_dir = phases_dir(&config.agents_dir);
-                match phase_agent_cmd(&phases_dir, &app.project_dir, provider, idx, app.dry_run) {
+                let target = if idx == 5 {
+                    SpawnTarget::Phase5Existing
+                } else if let Some(node) = app.graph_engine.as_ref().and_then(|graph| {
+                    graph
+                        .nodes
+                        .iter()
+                        .find(|node| node_phase(&node.id) == Some(idx))
+                }) {
+                    node_agent_cmd(
+                        &phases_dir,
+                        &app.project_dir,
+                        provider,
+                        app.current_model.as_deref(),
+                        node,
+                        app.dry_run,
+                    )
+                } else {
+                    SpawnTarget::Missing(format!("No validated graph node found for phase {idx}"))
+                };
+                match target {
                     SpawnTarget::Phase5Existing => {
                         // Single /phase 5 is not supported; it requires the composite build+test flow.
                         app.interaction.push(crate::app::InteractionMessage {
@@ -774,74 +827,129 @@ pub struct PipelineSpawn {
 /// Compute the next pipeline step, updating state for the phase that will run.
 /// Returns None when the pipeline is complete, halted, or no advance is needed.
 fn next_pipeline_spawn(config: &Config, app: &mut App) -> Option<PipelineSpawn> {
-    let state = app.pipeline_state.as_mut()?;
     if !app.pipeline_running {
         return None;
     }
-
-    let next_idx = crate::pipeline_engine::resume_phase_index(state);
-    if next_idx >= state.phases.len() {
-        // Pipeline complete.
+    let ready = app.graph_engine.as_ref()?.ready_set();
+    if ready.is_empty() {
+        let complete = app.graph_engine.as_ref()?.states.values().all(|state| {
+            matches!(state, NodeState::Succeeded | NodeState::Skipped)
+        });
+        if !complete {
+            return None;
+        }
         app.pipeline_running = false;
-        state.finished_at = Some(crate::pipeline_engine::now_iso());
-        let _ = save_pipeline_state(&pipeline_state_path(&app.project_dir), state);
+        if let Some(ref mut state) = app.pipeline_state {
+            state.finished_at = Some(crate::pipeline_engine::now_iso());
+            let _ = save_pipeline_state(&pipeline_state_path(&app.project_dir), state);
+        }
         app.interaction.push(crate::app::InteractionMessage {
             voice: crate::ui::theme::Voice::Agent,
-            text: "Pipeline complete (phases 0-5).".to_string(),
+            text: "Pipeline complete (seven graph nodes).".to_string(),
         });
         return None;
     }
-
-    if let Err(e) = start_phase(state, next_idx) {
+    let node_id = ready[0].clone();
+    let node = app
+        .graph_engine
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)?
+        .clone();
+    if let Err(error) = app.graph_engine.as_mut()?.start(&node_id) {
         app.interaction.push(crate::app::InteractionMessage {
             voice: crate::ui::theme::Voice::Error,
-            text: e,
+            text: error.to_string(),
         });
         app.pipeline_running = false;
         return None;
+    }
+    app.active_graph_node = Some(node_id.clone());
+    let _ = save_graph_state(
+        &graph_state_path(&app.project_dir),
+        app.graph_engine.as_ref()?,
+    );
+
+    let next_idx = node_phase(&node_id).unwrap_or(0);
+    if node_id != "phase5.test" {
+        if let Some(ref mut state) = app.pipeline_state {
+            if let Err(error) = start_phase(state, next_idx) {
+                app.interaction.push(crate::app::InteractionMessage {
+                    voice: crate::ui::theme::Voice::Error,
+                    text: error,
+                });
+                app.pipeline_running = false;
+                return None;
+            }
+        }
     }
 
     let provider = app.current_provider.as_deref();
     let phases_dir = phases_dir(&config.agents_dir);
 
-    match phase_agent_cmd(&phases_dir, &app.project_dir, provider, next_idx, app.dry_run) {
-        SpawnTarget::Phase5Existing => {
-            app.pipeline_phase5_step = Some(Phase5Step::Build);
-            let cmd = build_agent::build_agent_cmd(
-                &config.agents_dir,
-                app.project.as_deref(),
-                app.scheme.as_deref(),
-                provider,
-                app.current_model.as_deref(),
-                config.max_attempts,
-                config.verbose,
-                app.dry_run,
-            );
-            Some(PipelineSpawn {
-                cmd,
-                agent_kind: ActiveAgentKind::Build,
-                message: "Pipeline phase 5: starting BuildAgent...".to_string(),
-            })
-        }
+    if node_id == "phase5.build" {
+        app.pipeline_phase5_step = Some(Phase5Step::Build);
+        let cmd = build_agent::build_agent_cmd(
+            &config.agents_dir,
+            app.project.as_deref(),
+            app.scheme.as_deref(),
+            provider,
+            app.current_model.as_deref(),
+            config.max_attempts,
+            config.verbose,
+            app.dry_run,
+        );
+        return Some(PipelineSpawn {
+            cmd,
+            agent_kind: ActiveAgentKind::Build,
+            message: "Pipeline graph node phase5.build: starting BuildAgent...".to_string(),
+        });
+    }
+    if node_id == "phase5.test" {
+        app.pipeline_phase5_step = Some(Phase5Step::Test);
+        let cmd = test_agent::test_agent_cmd(
+            &config.agents_dir,
+            app.project.as_deref(),
+            app.scheme.as_deref(),
+            provider,
+            app.current_model.as_deref(),
+            config.simulator_name.as_deref(),
+            None,
+            None,
+            config.verbose,
+            app.dry_run,
+            app.test_coverage,
+            app.test_strategy.as_deref(),
+            app.test_files.as_deref(),
+            app.test_happy_only,
+        );
+        return Some(PipelineSpawn {
+            cmd,
+            agent_kind: ActiveAgentKind::Test,
+            message: "Pipeline graph node phase5.test: starting TestAgent...".to_string(),
+        });
+    }
+    match node_agent_cmd(
+        &phases_dir,
+        &app.project_dir,
+        provider,
+        app.current_model.as_deref(),
+        &node,
+        app.dry_run,
+    ) {
         SpawnTarget::Script(cmd) => {
-            let name = PipelinePhase::from_index(next_idx)
-                .map(|p| p.display_name())
-                .unwrap_or("?");
             Some(PipelineSpawn {
                 cmd,
                 agent_kind: ActiveAgentKind::PipelinePhase(next_idx),
-                message: format!("Pipeline phase {}: starting {}...", next_idx, name),
+                message: format!("Pipeline graph node {}: starting {}...", node_id, node.label),
             })
         }
+        SpawnTarget::Phase5Existing => unreachable!("node_agent_cmd never returns Phase5Existing"),
         SpawnTarget::Missing(msg) => {
-            let _ = apply_phase_outcome(
-                state,
-                next_idx,
-                AgentExitStatus::Misconfiguration,
-                None,
-                None,
-            );
-            let _ = save_pipeline_state(&pipeline_state_path(&app.project_dir), state);
+            if let Some(ref mut graph) = app.graph_engine {
+                let _ = graph.apply_exit_code(&node_id, 11);
+            }
             app.interaction.push(crate::app::InteractionMessage {
                 voice: crate::ui::theme::Voice::Error,
                 text: msg,
