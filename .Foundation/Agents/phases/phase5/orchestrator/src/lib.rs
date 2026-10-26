@@ -9,6 +9,7 @@ pub mod chat;
 #[allow(clippy::unnecessary_map_or)]
 pub mod detect;
 pub mod event;
+pub mod headless;
 pub mod kgpe;
 #[allow(clippy::manual_is_multiple_of)]
 pub mod mock;
@@ -132,6 +133,9 @@ impl Config {
 #[command(about = "Rust TUI orchestrator for Foundation build pipeline")]
 #[command(version)]
 pub struct CliArgs {
+    #[command(subcommand)]
+    pub command: Option<OrchCommand>,
+
     /// Run in mock mode with synthetic output (no subprocesses).
     #[arg(long)]
     pub mock: bool,
@@ -179,6 +183,54 @@ pub struct CliArgs {
     /// Artifacts output directory.
     #[arg(long)]
     pub artifacts_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum OrchCommand {
+    Graph(GraphArgs),
+    Pipeline(PipelineArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct GraphArgs {
+    #[command(subcommand)]
+    pub command: GraphCommand,
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum GraphCommand {
+    Validate {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        #[arg(long)]
+        agents_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Render {
+        #[arg(long, value_enum, default_value_t = GraphFormat::Mermaid)]
+        format: GraphFormat,
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GraphFormat {
+    Mermaid,
+    Dot,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct PipelineArgs {
+    #[arg(long, required = true)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub project_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub auto_approve: bool,
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Build a `PtySize` from terminal dimensions and current pane layout.

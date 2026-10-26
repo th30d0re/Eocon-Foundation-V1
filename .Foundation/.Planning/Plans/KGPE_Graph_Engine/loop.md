@@ -12,9 +12,10 @@ when both A and B verifiers are green.
 
 | Phase | Worker | Pattern | Status | Trigger | Artifact produced |
 |---|---|---|---|---|---|
-| A — Graph engine (Rust) | Codex | Goal + implementer/verifier | Dispatched | Manual | `src/kgpe/` module + tests |
-| B — Node manifests (bash) | Kimi | Implementer/verifier | Dispatched | Manual | `node.json` manifests, manifest-emitting Phase 1/4 |
-| C — Integration | TBD | Implementer/verifier | Blocked on A+B | Both verifiers green | Graph-driven `pipeline_engine.rs`, `/graph` commands |
+| A — Graph engine (Rust) | Codex | Goal + implementer/verifier | **Verified** 9/9 | Manual | `src/kgpe/` module + tests |
+| B — Node manifests (bash) | Kimi | Implementer/verifier | **Verified** 11/11 | Manual | `node.json` manifests, manifest-emitting Phase 1/4 |
+| C — Integration | Codex (solo) | Goal + implementer/verifier | **Verified** 11/11 | Both verifiers green | Graph-driven `pipeline_engine.rs`, `/graph` commands |
+| D — Headless CLI + live dry-run | Codex (solo) | Goal + implementer/verifier | Dispatched | C verified; commit 78bffa8 | `orch graph` / `orch pipeline` subcommands, executed dry-run evidence |
 
 ---
 
@@ -27,8 +28,12 @@ when both A and B verifiers are green.
 codex exec -s workspace-write -C <repo-root> --output-last-message <file> "<prompt>"
 
 # loop iteration — re-enters the SAME session with context intact
-codex exec resume --last "<fix prompt>"
-codex exec resume <SESSION_ID> "<fix prompt>"
+# NOTE: `resume` does NOT accept -s/--sandbox or -C/--cd. Passing -s fails with
+# "error: unexpected argument '-s' found". Set the sandbox via -c instead, and cd first.
+codex exec resume --last -c sandbox_mode="workspace-write" -o <file> "<fix prompt>"
+codex exec resume <SESSION_ID> -c sandbox_mode="workspace-write" "<fix prompt>"
+# resume DOES accept: -c/--config, --last, --all, -m/--model, --json,
+# -o/--output-last-message, -i/--image, --ephemeral, --skip-git-repo-check
 
 # structured verdict capture
 codex exec --output-schema <schema.json> --json "<verifier prompt>"
@@ -375,4 +380,119 @@ Checks:
 
 Record results in .Foundation/.Planning/Plans/KGPE_Graph_Engine/STATE.md under Phase C. Max 3
 fix attempts, then stop and escalate.
+```
+
+---
+
+## Phase D — Headless CLI and Live Dry-Run (solo worker: Codex)
+
+Baseline: commit `78bffa8` (A+B+C verified, 51 cargo tests, 7/7 bats).
+
+Everything green so far is unit tests, hand-derivation, and one integration test that loads the
+real manifests. **The scheduler has still never executed a graph.** Phase C's array-vs-single
+bug survived 46 passing tests precisely because each half only ever met its own fixtures; this
+phase closes that class of gap by actually running the thing.
+
+`orch` is TUI-only today (`main.rs` always calls `run(config)` → `init_terminal()`), so nothing
+can reach `/graph` or `/pipeline` without a human at a terminal. This phase adds a headless
+entry point, then uses it to perform and record a real dry-run.
+
+### Implementer prompt
+
+```text
+Use the define-goal skill. Create a goal whose objective is:
+
+"Add headless subcommands to the orch binary so the KGPE graph can be validated, rendered, and
+executed without a TUI, then perform a real end-to-end dry-run of all seven agent-graph nodes
+against a scratch Foundation project in a temp dir, verified by `cargo test` and
+`cargo clippy --all-targets -- -D warnings` passing plus a recorded transcript showing every
+node reaching a terminal state and graph_state.json matching the derived 7-stage order."
+
+Then implement it.
+
+Read first: .Foundation/.Planning/Plans/KGPE_Graph_Engine/tech-plan.md (contract),
+STATE.md (check 11 holds the expected graph shape), src/main.rs and src/lib.rs (current CLI
+surface and Config), src/kgpe/ (the engine), src/pipeline_engine.rs (graph execution).
+
+Deliverables:
+
+1. Subcommands on the orch binary via clap. Running orch with NO subcommand must still launch
+   the TUI exactly as today — this is a strict backward-compatibility requirement.
+   - orch graph validate [--project-dir <dir>] [--agents-dir <dir>] [--json]
+       Loads the agent-graph manifests, derives edges, runs full validation, prints the
+       GraphReport (nodes, edges, stages, critical path, errors, warnings). Exit 0 when valid,
+       non-zero with a named error when not. --json emits machine-readable output.
+   - orch graph render [--format mermaid|dot] [--project-dir <dir>]
+       Emits the derived graph as Mermaid or DOT text on stdout. Mermaid output must obey the
+       repo CLAUDE.md rules: camelCase node names, labels with special characters in double
+       quotes, no style or classDef directives.
+   - orch pipeline --dry-run [--project-dir <dir>] [--auto-approve] [--json]
+       Executes the graph headlessly: spawns each node's exec.path with --dry-run --yolo,
+       maps exit codes per PHASE_CONTRACT.md section 3, honors human gates, persists
+       graph_state.json, and prints per-node status as it goes.
+       Gate behavior, which is the point of the exercise: phase0 carries gate "human", so a
+       plain run MUST park at AwaitingApproval, print which node is gating and how to proceed,
+       and exit with a DISTINCT non-zero code (document it). With --auto-approve it drives
+       through gates to completion. Both paths must be tested.
+
+2. A real executed dry-run. Create a scratch Foundation project in a temp dir (mktemp -d) with
+   the five folders (Constitution/ Plans/ Guides/ Docs/ Design/) and a minimal toy Constitution
+   (C0.tex plus one sub-constitution). Run, and capture the actual terminal output of:
+     orch graph validate --project-dir <tmp>
+     orch graph render --format mermaid --project-dir <tmp>
+     orch pipeline --dry-run --project-dir <tmp>            (expect the phase0 gate park)
+     orch pipeline --dry-run --auto-approve --project-dir <tmp>   (expect full completion)
+   Write the captured transcripts plus your findings to
+   .Foundation/.Planning/Plans/KGPE_Graph_Engine/DRYRUN_REPORT.md, including: the derived graph
+   as rendered, every node's final state, the contents of graph_state.json, whether each phase
+   script's result.json showed status dry_run, and ANY defect you hit. Do not clean up the
+   evidence before recording it. Delete the temp project afterward.
+
+3. Tests covering: no-subcommand still starts the TUI path (assert on arg parsing, not by
+   launching a terminal); graph validate exit codes for valid and invalid manifest sets;
+   render output shape for both formats; the gate park and the auto-approve completion.
+
+Constraints:
+- Do NOT modify src/startup.rs (unrelated uncommitted user work must survive byte-for-byte).
+- Do NOT modify the Phase B node.json manifests. If one is genuinely wrong, STOP and escalate.
+- Do not weaken crate lint policy; no crate-wide allows; fix lints your own code triggers.
+- Do not add new crates; clap is already a dependency.
+- No fallback behavior; fail loudly with named errors. No emojis.
+- REPORT DEFECTS HONESTLY. If the dry-run reveals the scheduler is broken, say so plainly in
+  DRYRUN_REPORT.md and in your final message. A truthful failure report is the successful
+  outcome of this phase; a green report that required quietly working around a real defect is
+  a failed phase. Do not edit tests or manifests to manufacture a pass.
+
+When done: report files changed, full cargo test output, and paste the four captured
+transcripts. State explicitly whether the graph executed end to end on the first attempt.
+```
+
+### Verifier prompt
+
+```text
+Verify Phase D. You did not write this; verify adversarially.
+
+Checks:
+1. cargo build --release && cargo test && cargo clippy --all-targets -- -D warnings all pass.
+2. orch with NO subcommand still takes the TUI path — confirm by reading main.rs/lib.rs arg
+   parsing and by a test; the default behavior must be unchanged from commit 78bffa8.
+3. orch graph validate exits 0 on the real manifests and non-zero with a NAMED error on a
+   deliberately broken manifest set (construct one in a temp dir and run it yourself).
+4. orch graph render emits both mermaid and dot; the mermaid obeys CLAUDE.md rules (camelCase
+   nodes, quoted labels with special characters, no style/classDef).
+5. Re-run the dry-run yourself against a fresh temp project. Confirm independently: the plain
+   run parks at phase0's human gate with a distinct documented exit code, and --auto-approve
+   completes all seven nodes. Do not trust the recorded transcript — reproduce it.
+6. graph_state.json after the auto-approve run reflects all seven nodes terminal, in an order
+   consistent with the 7-stage layering in STATE.md check 11.
+7. Every phase script invoked wrote Artifacts/phase<N>_*/result.json with status dry_run, and
+   NO AI or network calls occurred during the dry-run (grep the transcripts for provider
+   invocations; StagesAgent in particular must make zero AI calls).
+8. DRYRUN_REPORT.md exists and its claims match what you reproduced. If it reports a defect,
+   confirm the defect is real and still present or genuinely fixed — do not let a papered-over
+   failure pass.
+9. src/startup.rs byte-for-byte unchanged; Phase B manifests unchanged (git diff clean).
+10. No crate-wide #![allow] added; the 51-test baseline from 78bffa8 still passes in full.
+
+Record results in STATE.md under Phase D. Max 3 fix attempts, then stop and escalate.
 ```

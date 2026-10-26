@@ -7,7 +7,7 @@
     "exec": {
       "type": "script",
       "path": "phase5/BuildAgent.sh",
-      "args": ["--plans-dir", "${PLANS_DIR}", "--prompt", "${PROMPT}", "--yolo"]
+      "args": ["--plans-dir", "${PLANS_DIR}", "--prompt-string", "${PROMPT}", "--yolo"]
     },
     "consumes": [
       { "type": "stages.graph" },

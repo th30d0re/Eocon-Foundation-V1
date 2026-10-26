@@ -17,13 +17,13 @@ The Swift application in `Foundation/` is also available as a separate repositor
 ### BuildAgent (AI-powered code generation)
 ```bash
 # Run from project root (auto-detects Xcode project up to 5 levels deep)
-.Foundation/Agents/phases/phase5/BuildAgent.sh --plans-dir <dir> --prompt "description"
+.Foundation/Agents/phases/phase5/BuildAgent.sh --plans-dir <dir> --prompt <file.txt>
 
 # With specific AI provider
-.Foundation/Agents/phases/phase5/BuildAgent.sh --ai-provider claude --plans-dir <dir> --prompt "description"
+.Foundation/Agents/phases/phase5/BuildAgent.sh --ai-provider claude --plans-dir <dir> --prompt-string "description"
 
 # YOLO mode (fully automated, auto-inits git if needed)
-.Foundation/Agents/phases/phase5/BuildAgent.sh --yolo --plans-dir <dir> --prompt "description"
+.Foundation/Agents/phases/phase5/BuildAgent.sh --yolo --plans-dir <dir> --prompt-string "description"
 ```
 
 Supported AI providers: `cursor` (default), `claude`, `codex`, `gemini`, `aider`, `letta`

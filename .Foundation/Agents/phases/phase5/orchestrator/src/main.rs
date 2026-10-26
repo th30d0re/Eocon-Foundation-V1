@@ -1,7 +1,7 @@
 use clap::Parser;
 
-use orch::{run, CliArgs, Config};
 use orch::tui::install_panic_hook;
+use orch::{headless::run_command, run, CliArgs, Config};
 
 fn main() -> std::process::ExitCode {
     if let Err(e) = color_eyre::install() {
@@ -11,6 +11,9 @@ fn main() -> std::process::ExitCode {
     install_panic_hook();
 
     let args = CliArgs::parse();
+    if args.command.is_some() {
+        return run_command(args);
+    }
     let config = match Config::build(args) {
         Ok(c) => c,
         Err(e) => {
